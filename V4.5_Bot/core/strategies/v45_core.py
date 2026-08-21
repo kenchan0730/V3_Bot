@@ -20,6 +20,9 @@ class V45CoreStrategy(BaseStrategy):
         self.max_vol_ratio_low = float(self.config.get("max_vol_ratio_low", 0.8))
 
     def prefilter(self, df, context):
+        if not context.allow_new_entries and context.regime in ("RISK_OFF", "CRISIS"):
+            return False, f"regime {context.regime} blocks new entries"
+
         z_score = context.quant.get("z_score", 0.0)
         if z_score < context.zscore_min:
             return False, f"Z-Score {z_score:.2f} < 下限 {context.zscore_min}"

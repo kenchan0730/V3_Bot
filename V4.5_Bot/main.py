@@ -20,6 +20,7 @@ from core.data_utils import normalize_columns, quality_report
 from core.emotion_manager import EmotionManager
 from core.fundamental_filter import FundamentalFilter
 from core.ibkr_connector import IBKRConnector
+from core.intraday_engine import IntradayEngine
 from core.logging_setup import configure_logging
 from core.market_breadth import MarketBreadth
 from core.news_sentiment import NewsSentiment
@@ -27,10 +28,12 @@ from core.notifier import Notifier
 from core.order_manager import OrderManager
 from core.portfolio import Portfolio
 from core.quant_engine import QuantEngine
+from core.regime import CRISIS, RegimeDetector
 from core.risk_manager import RiskManager
 from core.sector_tracker import SectorTracker
 from core.strategies import MarketContext, load_strategies
 from core.trading_state import TradingState
+from core.watchlist_manager import WatchlistManager
 
 logger = logging.getLogger(__name__)
 
@@ -48,10 +51,16 @@ class TradingBot:
 
         self.auto_trade = bool(trading_cfg.get("auto_trade", False)) and not dry_run
         self.market_hours_only = bool(trading_cfg.get("market_hours_only", True))
+        self.intraday_mode = bool(trading_cfg.get("intraday_mode", False))
         self.price_limit = float(trading_cfg.get("price_limit", 40))
         self.max_shares = int(trading_cfg.get("max_shares", 20))
         self.scan_interval = int(trading_cfg.get("scan_interval_seconds", 300))
-        self.watchlist = config.get("watchlist", ["AVAH"])
+        self.scan_interval_intraday = int(trading_cfg.get("scan_interval_intraday", 60))
+
+        wl_cfg = config.get("watchlist", ["AVAH"])
+        self.regime_detector = RegimeDetector(config.get("regime", {}))
+        self.watchlist_mgr = WatchlistManager(wl_cfg, portfolio=None)
+        self.watchlist = self.watchlist_mgr.get_active_watchlist()
 
         self.min_bars = int(data_cfg.get("min_bars", 60))
         self.max_age_trading_days = int(data_cfg.get("max_age_trading_days", 2))
@@ -97,6 +106,11 @@ class TradingBot:
             ibkr=self.ibkr, timeout_seconds=self.order_timeout,
             blotter=self.blotter, notifier=self.notifier,
         )
+        self.watchlist_mgr.portfolio = self.portfolio
+        self.intraday = IntradayEngine(config.get("intraday", {}), ibkr=self.ibkr)
+        self.current_regime = None
+        self.allow_new_entries = True
+        self.allow_intraday_entries = True
 
         self.seen_exec_ids = set()
         self.data_failures = {}
@@ -134,24 +148,56 @@ class TradingBot:
             logger.warning(f"市場寬度獲取失敗: {e}")
             breadth = None
 
-        base_min = float((self.config.get("zscore", {}) or {}).get("best_zone_min", 0.5))
+        breadth_score = breadth.get("score", 50) if breadth else 50
+        self.breadth_score = breadth_score
+
         if breadth:
-            score = breadth.get("score", 50)
-            self.breadth_score = score
-            zone, zone_msg = MarketBreadth.get_health_zone(score)
-            exposure = MarketBreadth.get_exposure_recommendation(score)
-            logger.info(f"📊 市場寬度: {score}/100 ({zone}) — {zone_msg}")
-            if score < 20:
-                self.state.halt(f"市場寬度危急 ({score}/100)")
-                self.notifier.alert_risk_limit(f"市場寬度 {score}/100，暫停交易")
-                self.blotter.log_event("HALT", reason=f"breadth={score}")
-            self.zscore_min = 0.8 if score < 40 else base_min
-        else:
-            self.zscore_min = base_min
-            exposure = 100
+            zone, zone_msg = MarketBreadth.get_health_zone(breadth_score)
+            logger.info(f"📊 市場寬度: {breadth_score}/100 ({zone}) — {zone_msg}")
+            if breadth_score < 20 and self.regime_detector.cfg.get("halt_on_crisis", True):
+                self.state.halt(f"市場寬度危急 ({breadth_score}/100)")
+                self.notifier.alert_risk_limit(f"市場寬度 {breadth_score}/100，暫停交易")
+                self.blotter.log_event("HALT", reason=f"breadth={breadth_score}")
+
+        regime_result = self.regime_detector.detect(
+            vix=self.current_vix, breadth_score=breadth_score, force_macro_refresh=force,
+        )
+        self.current_regime = regime_result
+        self.allow_new_entries = regime_result.allow_new_entries
+        self.allow_intraday_entries = regime_result.allow_intraday_entries
+        self.zscore_min = regime_result.zscore_min
+        exposure = regime_result.exposure_pct
+
+        logger.info(
+            f"🌡️ Regime: {regime_result.regime} ({regime_result.score:.0f}/100) | "
+            f"曝險 {exposure}% | Z下限 {self.zscore_min} | "
+            f"新倉 {'允許' if self.allow_new_entries else '禁止'}"
+        )
+        if regime_result.regime == CRISIS:
+            self.blotter.log_event("REGIME", reason=f"CRISIS score={regime_result.score:.0f}")
 
         self.exposure = self._apply_sector_exposure(exposure)
         logger.info(f"📉 建議曝險: {self.exposure}% | Z-Score 下限: {self.zscore_min}")
+
+    def refresh_watchlist_if_due(self, force=False):
+        try:
+            positions = list(self.portfolio.positions.keys()) if self.portfolio else []
+            if force or self.watchlist_mgr.needs_refresh():
+                active = self.watchlist_mgr.refresh(
+                    fundamental_filter=self.fundamental if self.fundamental else None,
+                    force=force,
+                )
+            else:
+                active = self.watchlist_mgr.get_active_watchlist(open_positions=positions)
+            if positions:
+                seen = set(active)
+                for sym in positions:
+                    if sym not in seen:
+                        active.insert(0, sym)
+            self.watchlist = active[: int(self.watchlist_mgr.cfg.get("max_active", 20))]
+            logger.info(f"📋 活躍 watchlist ({len(self.watchlist)}): {self.watchlist}")
+        except Exception as e:
+            logger.warning(f"Watchlist 更新失敗: {e}")
 
     def _apply_sector_exposure(self, base_exposure):
         if not (self.config.get("sector", {}) or {}).get("enabled", True):
@@ -294,6 +340,23 @@ class TradingBot:
         stop = signal["stop"]
         target = signal.get("target1")
 
+        intraday_check = {"ok": True, "reason": "intraday skipped", "entry_price": entry, "metrics": {}}
+        if self.intraday_mode and self.intraday.cfg.get("enabled", True):
+            if not self.allow_intraday_entries:
+                logger.info(f"   ⏳ Regime 禁止盤中進場")
+                self.blotter.log_rejection(symbol, f"regime {self.current_regime.regime} blocks intraday", stage="REGIME")
+                return
+            intraday_check = self.intraday.evaluate_entry(symbol, signal.get("action", "STRONG_BUY"), entry)
+            if not intraday_check.get("ok"):
+                logger.info(f"   ⏳ 盤中確認未通過: {intraday_check.get('reason')}")
+                self.blotter.log_rejection(symbol, intraday_check.get("reason", ""), stage="INTRADAY")
+                return
+            entry = intraday_check.get("entry_price", entry)
+            logger.info(
+                f"   ✅ 盤中確認: {intraday_check.get('reason')} | "
+                f"VWAP {intraday_check.get('metrics', {}).get('vwap')} | 進場 ${entry:.2f}"
+            )
+
         shares = self.risk_mgr.calculate_position_size(entry, stop, self.price_limit, self.max_shares)
         if self.exposure < 100:
             shares = int(shares * self.exposure / 100)
@@ -407,6 +470,9 @@ class TradingBot:
             symbol=symbol, price=price, vix=self.current_vix, zscore_min=self.zscore_min,
             exposure=self.exposure, breadth_score=self.breadth_score, quant=quant,
             vol_ratio=vol_ratio, ma20=ma20, ma50=ma50,
+            regime=self.current_regime.regime if self.current_regime else "NEUTRAL",
+            regime_score=self.current_regime.score if self.current_regime else None,
+            allow_new_entries=self.allow_new_entries,
         )
 
         can_trade, emo_msg = self.emotion.check_before_trade()
@@ -507,6 +573,7 @@ class TradingBot:
 
         self.refresh_vix()
         self.refresh_market_context(force=True)
+        self.refresh_watchlist_if_due(force=True)
         self.reconcile()
 
         cycle = 0
@@ -526,14 +593,17 @@ class TradingBot:
 
                     self.refresh_market_context()
                     self.refresh_vix()
+                    self.refresh_watchlist_if_due()
                     self.reconcile()
 
                     self.order_mgr.poll()
                     self.order_mgr.cancel_stale()
 
                     may_trade, gate_reason = self.check_gates()
+                    regime_label = self.current_regime.regime if self.current_regime else "N/A"
                     logger.info(
                         f"💰 當日已實現 ${self.risk_mgr.get_daily_pnl():.2f} | "
+                        f"Regime {regime_label} | "
                         f"曝險 {self.portfolio.gross_exposure_pct(self.risk_mgr.total_capital):.1f}% | "
                         f"持倉 {self.portfolio.open_position_count()} | 風控: {gate_reason}"
                     )
@@ -547,6 +617,8 @@ class TradingBot:
                             break
                         try:
                             if not may_trade and not self.portfolio.has_position(symbol):
+                                continue
+                            if not self.allow_new_entries and not self.portfolio.has_position(symbol):
                                 continue
                             self.process_symbol(symbol)
                         except Exception as e:
@@ -564,7 +636,10 @@ class TradingBot:
                 if self.max_cycles and cycle >= self.max_cycles:
                     logger.info(f"已完成 {cycle} 次掃描（max_cycles），結束")
                     break
-                self._sleep(self.scan_interval)
+                interval = self.scan_interval
+                if self.intraday_mode and RiskManager.is_market_open():
+                    interval = self.scan_interval_intraday
+                self._sleep(interval)
 
         except Exception as e:
             logger.exception(f"主循環異常: {e}")

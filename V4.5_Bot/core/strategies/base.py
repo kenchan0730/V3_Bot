@@ -14,7 +14,9 @@ class MarketContext:
     """Context passed to every strategy evaluation."""
 
     def __init__(self, symbol, price, vix=18.0, zscore_min=0.5, exposure=100,
-                 breadth_score=None, quant=None, vol_ratio=None, ma20=None, ma50=None):
+                 breadth_score=None, quant=None, vol_ratio=None, ma20=None, ma50=None,
+                 regime=None, regime_score=None, allow_new_entries=True,
+                 intraday=None):
         self.symbol = symbol
         self.price = price
         self.vix = vix
@@ -25,6 +27,10 @@ class MarketContext:
         self.vol_ratio = vol_ratio
         self.ma20 = ma20
         self.ma50 = ma50
+        self.regime = regime or "NEUTRAL"
+        self.regime_score = regime_score
+        self.allow_new_entries = allow_new_entries
+        self.intraday = intraday or {}
 
 
 class BaseStrategy(ABC):

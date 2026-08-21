@@ -66,11 +66,68 @@ trading:
   auto_trade: false        # 僅在 H1–H10 驗證並完成紙上交易後才開啟
   market_hours_only: true
   scan_interval_seconds: 300
+  scan_interval_intraday: 60   # 盤中模式下的掃描間隔（秒）
+  intraday_mode: true          # 啟用盤中進場確認（需 IBKR 或 yfinance 5m 備援）
+
+regime:
+  enabled: true
+  vix_risk_on: 18.0
+  vix_neutral: 22.0
+  vix_risk_off: 28.0
+  vix_crisis: 35.0
+  breadth_risk_on: 65.0
+  breadth_neutral: 45.0
+  breadth_risk_off: 30.0
+  risk_on_exposure: 100
+  neutral_exposure: 60
+  risk_off_exposure: 25
+  crisis_exposure: 0
+  risk_on_zscore_min: 0.5
+  neutral_zscore_min: 0.8
+  risk_off_zscore_min: 1.2
+  crisis_zscore_min: 999.0
+  credit_stress_pct: -2.0
+  halt_on_crisis: true
+
+intraday:
+  enabled: true
+  bar_size: "5 mins"
+  fallback_interval: "5m"
+  opening_range_minutes: 30
+  vwap_pullback_pct: 0.8
+  max_distance_from_vwap_pct: 1.5
+  min_intraday_bars: 12
+  require_above_vwap: false
+  allow_opening_range_breakout: true
+  skip_first_minutes: 5
+  skip_last_minutes: 10
 
 watchlist:
-  - "AVAH"
-  - "EROC"
-  - "QXO"
+  core:
+    - AVAH
+    - EROC
+    - QXO
+  satellite:
+    - F
+    - SOFI
+    - PLUG
+    - SNAP
+    - HOOD
+    - NIO
+    - INTC
+    - AAL
+  max_active: 18
+  max_core: 5
+  max_satellite: 12
+  refresh_hours: 168           # 每週刷新 satellite（0 = 關閉自動刷新）
+  persist_file: logs/watchlist.json
+  correlation_threshold: 0.78
+  scanner:
+    enabled: true
+    source: sp500
+    max_scan: 120
+    min_price: 5
+    max_price: 40
 
 strategies:
   - name: v45_core
