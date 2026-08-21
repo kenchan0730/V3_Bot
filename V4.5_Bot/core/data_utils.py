@@ -1,9 +1,11 @@
 """Shared OHLCV helpers: column normalisation and data quality validation."""
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date
 
 import pandas as pd
+
+from core.market_calendar import MarketCalendar
 
 logger = logging.getLogger(__name__)
 
@@ -37,24 +39,13 @@ def latest_bar_date(df):
 
 
 def previous_trading_day(reference=None):
-    """Previous weekday (US holidays are not modelled)."""
-    reference = reference or date.today()
-    cursor = reference - timedelta(days=1)
-    while cursor.weekday() >= 5:
-        cursor -= timedelta(days=1)
-    return cursor
+    """Previous NYSE session, skipping weekends and market holidays."""
+    return MarketCalendar.previous_trading_day(reference)
 
 
 def trading_days_between(older, newer):
-    """Count weekdays strictly after `older` up to and including `newer`."""
-    if older is None or newer is None or newer <= older:
-        return 0
-    count, cursor = 0, older + timedelta(days=1)
-    while cursor <= newer:
-        if cursor.weekday() < 5:
-            count += 1
-        cursor += timedelta(days=1)
-    return count
+    """Count NYSE sessions strictly after `older` up to and including `newer`."""
+    return MarketCalendar.trading_days_between(older, newer)
 
 
 def validate_freshness(df, max_age_trading_days=2, reference=None):

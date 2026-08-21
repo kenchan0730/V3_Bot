@@ -15,7 +15,7 @@ jobs:
 
     defaults:
       run:
-        working-directory: V3_Bot
+        working-directory: V4.5_Bot
 
     steps:
       - uses: actions/checkout@v4
@@ -24,7 +24,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: V3_Bot/requirements.txt
+          cache-dependency-path: V4.5_Bot/requirements.txt
 
       - name: Install dependencies
         run: |
@@ -49,5 +49,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: coverage-${{ matrix.python-version }}
-          path: V3_Bot/coverage.xml
+          path: V4.5_Bot/coverage.xml
           if-no-files-found: ignore

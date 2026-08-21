@@ -22,6 +22,7 @@ core/
   config_loader.py        # YAML + .env loading with ${VAR} expansion
   logging_setup.py        # Rotating file + console logging
   trading_state.py        # Capital, counters, realised P&L ledger, persistence
+  market_calendar.py      # NYSE holidays, early closes, trading-day arithmetic
   data_utils.py           # Column normalisation + data quality gates
   quant_engine.py         # Z-Score, RSI, momentum/volume/volatility scoring
   candle_patterns.py      # Hammer, engulfing, doji, morning/evening star
@@ -80,7 +81,7 @@ logs/                     # trading.log, state.json, trade_blotter.csv
 ## Setup
 
 ```bash
-cd V3_Bot
+cd V4.5_Bot
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
@@ -190,9 +191,12 @@ Rows carry both UTC and local timestamps and are never rewritten.
 
 ## Notes and limitations
 
-- Folder is still `V3_Bot`; the runtime version is V4.5.
 - Daily bars only; the scan cadence suits a daily-bar strategy.
-- US market holidays are not modelled — only weekends are excluded.
 - Realised P&L relies on IBKR `commissionReport.realizedPNL`.
+- The NYSE calendar is computed from rules (no data feed), so an unscheduled
+  closure — a weather day or national day of mourning — is not known in advance.
 - `archive/stock_scanner.py` is for offline watchlist building, not the live loop.
 - Signal logic and `QuantEngine` behaviour are unchanged from V4.5.
+- **Execution has not been validated against live broker fills.** Bracket
+  submission, partial fills and cancellation are covered by test doubles only.
+  Complete the paper-trading week in [`RUNBOOK.md`](RUNBOOK.md) §6 first.

@@ -5,6 +5,7 @@ from datetime import datetime
 
 import pytz
 
+from core.market_calendar import MarketCalendar
 from core.trading_state import TradingState
 
 logger = logging.getLogger(__name__)
@@ -145,9 +146,7 @@ class RiskManager:
         return self.current_risk_pct
 
     @staticmethod
-    def is_market_open():
-        et = pytz.timezone("US/Eastern")
-        now = datetime.now(et)
-        is_weekday = now.weekday() < 5
-        is_trading_hour = (9, 30) <= (now.hour, now.minute) < (16, 0)
-        return is_weekday and is_trading_hour
+    def is_market_open(now=None):
+        """US regular session check honouring holidays and half-day closes."""
+        now = now or datetime.now(pytz.timezone("US/Eastern"))
+        return MarketCalendar.is_session_open(now)

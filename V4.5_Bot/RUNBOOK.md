@@ -21,7 +21,7 @@ Auto-trade downgrades itself to signal-only if IBKR cannot be reached at startup
 ## 2. First-time setup
 
 ```bash
-cd V3_Bot
+cd V4.5_Bot
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
