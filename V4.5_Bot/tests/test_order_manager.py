@@ -43,6 +43,14 @@ def test_track_registers_order(manager):
     assert len(manager.open_orders()) == 1
 
 
+def test_track_is_idempotent(manager):
+    first = manager.track(42, "QXO", "BUY", 5, entry=10.0, stop=9.0, target=12.0)
+    second = manager.track(42, "QXO", "BUY", 99, entry=99.0, stop=1.0, target=100.0)
+    assert first is second
+    assert second.quantity == 5
+    assert len(manager.orders) == 1
+
+
 def test_track_bracket(manager):
     bracket = {
         "parent_id": 7, "symbol": "AVAH", "action": "BUY", "quantity": 5,

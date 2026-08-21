@@ -16,3 +16,7 @@ Modules kept for reference but intentionally excluded from the live trading loop
 - `news_sentiment.py` was moved back to `core/` and is wired as an optional
   sentiment gate. It stays disabled until `FINNHUB_KEY` is present in `.env`
   and `news.enabled: true` is set in `config.yaml`.
+
+## Utility scripts
+
+Ad-hoc diagnostics live under `scripts/` (see `scripts/README.md`).

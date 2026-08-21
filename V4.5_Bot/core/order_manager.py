@@ -68,6 +68,10 @@ class OrderManager:
         self.orders = {}
 
     def track(self, order_id, symbol, action, quantity, entry=None, stop=None, target=None, trade=None):
+        """Register an order. Re-registering the same ``order_id`` is a no-op (idempotent)."""
+        existing = self.orders.get(order_id)
+        if existing is not None:
+            return existing
         managed = ManagedOrder(order_id, symbol, action, quantity, entry, stop, target, trade)
         self.orders[order_id] = managed
         return managed
