@@ -1,356 +1,627 @@
 #!/usr/bin/env python3
-"""
-V4.5 交易機器人 - 強化版
-功能：K線自動識別 + 綜合信號 + 自動重連 + 時段過濾 + 日虧損上限
+"""V4.5 交易機器人 — 機構級版本
+
+新增：即時盈虧對帳、Bracket 訂單、持倉平倉、下單前驗證、組合層風控、
+稽核軌跡、數據新鮮度驗證、告警、訂單生命週期管理。
 """
 
-import json
+import argparse
 import logging
 import signal
 import sys
 import time
-import yaml
-import yfinance as yf
-import pandas as pd
 from datetime import datetime
-from pathlib import Path
 
+import yfinance as yf
+
+from core.blotter import Blotter
+from core.config_loader import load_config
+from core.data_utils import normalize_columns, quality_report
+from core.emotion_manager import EmotionManager
+from core.fundamental_filter import FundamentalFilter
+from core.ibkr_connector import IBKRConnector
+from core.logging_setup import configure_logging
+from core.market_breadth import MarketBreadth
+from core.news_sentiment import NewsSentiment
+from core.notifier import Notifier
+from core.order_manager import OrderManager
+from core.portfolio import Portfolio
 from core.quant_engine import QuantEngine
 from core.risk_manager import RiskManager
-from core.emotion_manager import EmotionManager
 from core.sector_tracker import SectorTracker
-from core.market_breadth import MarketBreadth
-from core.trading_signals import TradingSignals
-from core.ibkr_connector import IBKRConnector
-from core.data_utils import normalize_columns
-from core.fundamental_filter import FundamentalFilter
-from core.notifier import Notifier
+from core.strategies import MarketContext, load_strategies
+from core.trading_state import TradingState
 
-STATE_FILE = Path("logs/state.json")
-shutdown_requested = False
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("logs/trading.log", encoding="utf-8"),
-        logging.StreamHandler()
-    ]
-)
 logger = logging.getLogger(__name__)
 
 
-def load_config():
-    with open("config.yaml", "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+class TradingBot:
+    def __init__(self, config, dry_run=False):
+        self.config = config
+        self.dry_run = dry_run
+        self.shutdown_requested = False
 
+        trading_cfg = config.get("trading", {}) or {}
+        risk_cfg = config.get("risk", {}) or {}
+        data_cfg = config.get("data", {}) or {}
+        exec_cfg = config.get("execution", {}) or {}
 
-def get_vix():
-    for attempt in range(3):
-        try:
-            vix = yf.Ticker("^VIX")
-            data = vix.history(period="1d", progress=False)
-            if not data.empty:
-                return float(data["Close"].iloc[-1])
-        except Exception as e:
-            logger.warning(f"VIX 獲取失敗 (嘗試 {attempt + 1}/3): {e}")
-            time.sleep(1)
-    return 18.0
+        self.auto_trade = bool(trading_cfg.get("auto_trade", False)) and not dry_run
+        self.market_hours_only = bool(trading_cfg.get("market_hours_only", True))
+        self.price_limit = float(trading_cfg.get("price_limit", 40))
+        self.max_shares = int(trading_cfg.get("max_shares", 20))
+        self.scan_interval = int(trading_cfg.get("scan_interval_seconds", 300))
+        self.watchlist = config.get("watchlist", ["AVAH"])
 
+        self.min_bars = int(data_cfg.get("min_bars", 60))
+        self.max_age_trading_days = int(data_cfg.get("max_age_trading_days", 2))
+        self.max_daily_move_pct = float(data_cfg.get("max_daily_move_pct", 40.0))
+        self.max_data_failures = int(data_cfg.get("max_consecutive_failures", 3))
+        self.context_refresh_seconds = int(data_cfg.get("context_refresh_seconds", 3600))
 
-def fetch_symbol_data(symbol, ibkr):
-    """Fetch OHLCV data from IBKR or yfinance fallback."""
-    if ibkr.connected:
-        df = ibkr.get_historical_data(symbol, duration="3 M", bar_size="1 day")
-        if df is not None and len(df) >= 60:
-            return df
-        logger.warning(f"{symbol} IBKR 數據不足，改用 yfinance")
-    df = yf.download(symbol, period="3mo", interval="1d", progress=False)
-    if df.empty or len(df) < 60:
-        return None
-    return df
+        self.slippage_ticks = float(exec_cfg.get("slippage_ticks", 1))
+        self.tick_size = float(exec_cfg.get("tick_size", 0.01))
+        self.use_bracket_orders = bool(exec_cfg.get("use_bracket_orders", True))
+        self.order_timeout = int(exec_cfg.get("order_timeout_seconds", 300))
 
+        total_capital = float(config.get("capital", {}).get("total", 385.0))
 
-def save_state(risk_mgr, emotion):
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    state = {
-        "saved_at": datetime.now().isoformat(),
-        "total_capital": risk_mgr.total_capital,
-        "daily_loss": risk_mgr.daily_loss,
-        "consecutive_losses": risk_mgr.consecutive_losses,
-        "today_trades": risk_mgr.today_trades,
-        "emotion_today_trades": emotion.today_trades,
-        "emotion_consecutive_losses": emotion.consecutive_losses,
-    }
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2)
-    logger.info(f"狀態已保存至 {STATE_FILE}")
+        self.state = TradingState(
+            initial_capital=total_capital,
+            state_file=config.get("state", {}).get("file", "logs/state.json"),
+        )
+        self.state.load()
 
+        self.notifier = Notifier(config.get("notifier", {}))
+        self.blotter = Blotter(config.get("audit", {}).get("blotter_file", "logs/trade_blotter.csv"))
+        self.risk_mgr = RiskManager(
+            initial_capital=total_capital,
+            config={**risk_cfg, "vix_threshold": (config.get("volatility", {}) or {}).get("vix_threshold", 25)},
+            state=self.state,
+        )
+        self.emotion = EmotionManager(state=self.state, config=config.get("emotion", {}))
+        self.portfolio = Portfolio(config.get("portfolio", {}))
+        self.fundamental = FundamentalFilter(config.get("fundamental", {}))
+        self.news = NewsSentiment(config.get("news", {}))
+        self.strategies = load_strategies(config)
 
-def load_state(risk_mgr, emotion):
-    if not STATE_FILE.exists():
-        return
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            state = json.load(f)
-        risk_mgr.total_capital = float(state.get("total_capital", risk_mgr.total_capital))
-        risk_mgr.daily_loss = float(state.get("daily_loss", 0.0))
-        risk_mgr.consecutive_losses = int(state.get("consecutive_losses", 0))
-        risk_mgr.today_trades = int(state.get("today_trades", 0))
-        emotion.today_trades = int(state.get("emotion_today_trades", 0))
-        emotion.consecutive_losses = int(state.get("emotion_consecutive_losses", 0))
-        logger.info(f"已載入狀態 ({state.get('saved_at', 'unknown')})")
-    except Exception as e:
-        logger.warning(f"狀態載入失敗: {e}")
+        ibkr_cfg = config.get("ibkr", {}) or {}
+        self.ibkr = IBKRConnector(
+            ibkr_cfg.get("host", "127.0.0.1"),
+            ibkr_cfg.get("port", 7497),
+            ibkr_cfg.get("client_id", 1),
+            max_retries=int(ibkr_cfg.get("max_retries", 10)),
+            account_mode=ibkr_cfg.get("account_mode", "paper"),
+        )
+        self.order_mgr = OrderManager(
+            ibkr=self.ibkr, timeout_seconds=self.order_timeout,
+            blotter=self.blotter, notifier=self.notifier,
+        )
 
+        self.seen_exec_ids = set()
+        self.data_failures = {}
+        self.returns_cache = {}
+        self.zscore_min = float((config.get("zscore", {}) or {}).get("best_zone_min", 0.5))
+        self.exposure = 100
+        self.breadth_score = None
+        self.last_context_refresh = 0.0
+        self.was_connected = False
+        self.current_vix = 18.0
+        self.max_cycles = None
 
-def request_shutdown(signum, frame):
-    global shutdown_requested
-    logger.info(f"收到停止信號 ({signum})，準備安全關閉...")
-    shutdown_requested = True
+    # ----- signals -----
 
+    def request_shutdown(self, signum, _frame):
+        logger.info(f"收到停止信號 ({signum})，準備安全關閉...")
+        self.shutdown_requested = True
 
-def apply_sector_exposure(base_exposure, sector_enabled):
-    if not sector_enabled:
-        return base_exposure
-    try:
-        sector_info = SectorTracker.get_sector_rating()
-        weights = sector_info.get("weights", {})
-        if not weights:
-            return base_exposure
-        avg_weight = sum(weights.values()) / len(weights)
-        adjusted = int(base_exposure * avg_weight / 100)
-        for alert in sector_info.get("alerts", []):
-            logger.warning(f"板塊警報: {alert}")
-        return max(0, min(100, adjusted))
-    except Exception as e:
-        logger.warning(f"板塊分析失敗: {e}")
-        return base_exposure
+    def _sleep(self, seconds):
+        """Interruptible sleep so shutdown stays responsive."""
+        deadline = time.time() + seconds
+        while time.time() < deadline and not self.shutdown_requested:
+            time.sleep(min(2, max(0, deadline - time.time())))
 
+    # ----- market context (M14) -----
 
-def main():
-    global shutdown_requested
-
-    signal.signal(signal.SIGINT, request_shutdown)
-    signal.signal(signal.SIGTERM, request_shutdown)
-
-    logger.info("=" * 60)
-    logger.info("🚀 V4.5 交易機器人啟動 (強化版)")
-    logger.info(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info("=" * 60)
-
-    config = load_config()
-    risk_config = config.get("risk", {})
-    total_capital = float(config.get("capital", {}).get("total", 385.0))
-    auto_trade = config.get("trading", {}).get("auto_trade", False)
-    market_hours_only = config.get("trading", {}).get("market_hours_only", True)
-    price_limit = float(config.get("trading", {}).get("price_limit", 40))
-    max_shares = int(config.get("trading", {}).get("max_shares", 20))
-    sector_enabled = config.get("sector", {}).get("enabled", True)
-
-    ibkr = IBKRConnector(
-        config["ibkr"]["host"],
-        config["ibkr"]["port"],
-        config["ibkr"]["client_id"]
-    )
-    try:
-        if not ibkr.connect():
-            logger.warning("⚠️ IBKR 連線失敗，將使用 yfinance 數據（僅顯示信號）")
-        else:
-            logger.info("✅ IBKR 已連線")
-    except Exception as e:
-        logger.error(f"IBKR 初始化失敗: {e}")
-
-    risk_mgr = RiskManager(
-        total_capital,
-        risk_config.get("max_risk_percent", 2.0),
-        risk_config.get("daily_loss_limit", 2.0),
-    )
-    emotion = EmotionManager()
-    fundamental = FundamentalFilter(config.get("fundamental", {}))
-    notifier = Notifier(config.get("notifier", {}))
-    load_state(risk_mgr, emotion)
-
-    try:
-        vix = get_vix()
-        risk_mgr.check_vix(vix)
-    except Exception as e:
-        logger.error(f"VIX 檢查失敗: {e}")
-        vix = 18.0
-
-    breadth = MarketBreadth.get_breadth_score()
-    if breadth:
-        score = breadth["score"]
-        zone, zone_msg = MarketBreadth.get_health_zone(score)
-        exposure = MarketBreadth.get_exposure_recommendation(score)
-        logger.info(f"📊 市場寬度: {score}/100 ({zone}) — {zone_msg}")
-        if score < 20:
-            logger.error("🔴 市場寬度危急，暫停交易")
-            save_state(risk_mgr, emotion)
-            ibkr.disconnect()
+    def refresh_market_context(self, force=False):
+        if not force and time.time() - self.last_context_refresh < self.context_refresh_seconds:
             return
-        zscore_min = 0.8 if score < 40 else config.get("zscore", {}).get("best_zone_min", 0.5)
-    else:
-        zscore_min = config.get("zscore", {}).get("best_zone_min", 0.5)
-        exposure = 100
+        self.last_context_refresh = time.time()
 
-    exposure = apply_sector_exposure(exposure, sector_enabled)
-    logger.info(f"📉 建議曝險: {exposure}% | Z-Score 下限: {zscore_min}")
+        try:
+            breadth = MarketBreadth.get_breadth_score()
+        except Exception as e:
+            logger.warning(f"市場寬度獲取失敗: {e}")
+            breadth = None
 
-    watchlist = config.get("watchlist", ["AVAH"])
-    cycle = 0
+        base_min = float((self.config.get("zscore", {}) or {}).get("best_zone_min", 0.5))
+        if breadth:
+            score = breadth.get("score", 50)
+            self.breadth_score = score
+            zone, zone_msg = MarketBreadth.get_health_zone(score)
+            exposure = MarketBreadth.get_exposure_recommendation(score)
+            logger.info(f"📊 市場寬度: {score}/100 ({zone}) — {zone_msg}")
+            if score < 20:
+                self.state.halt(f"市場寬度危急 ({score}/100)")
+                self.notifier.alert_risk_limit(f"市場寬度 {score}/100，暫停交易")
+                self.blotter.log_event("HALT", reason=f"breadth={score}")
+            self.zscore_min = 0.8 if score < 40 else base_min
+        else:
+            self.zscore_min = base_min
+            exposure = 100
 
-    try:
-        while not shutdown_requested:
-            cycle += 1
-            logger.info(f"\n🔄 第 {cycle} 次掃描 ({datetime.now().strftime('%H:%M:%S')})")
+        self.exposure = self._apply_sector_exposure(exposure)
+        logger.info(f"📉 建議曝險: {self.exposure}% | Z-Score 下限: {self.zscore_min}")
 
-            if market_hours_only and not RiskManager.is_market_open():
-                logger.info("💤 美股已收市，暫停掃描 10 分鐘")
-                for _ in range(60):
-                    if shutdown_requested:
-                        break
-                    time.sleep(10)
+    def _apply_sector_exposure(self, base_exposure):
+        if not (self.config.get("sector", {}) or {}).get("enabled", True):
+            return base_exposure
+        try:
+            rating = SectorTracker.get_sector_rating()
+            weights = rating.get("weights", {})
+            if not weights:
+                return base_exposure
+            avg_weight = sum(weights.values()) / len(weights)
+            for alert in rating.get("alerts", []):
+                logger.warning(f"板塊警報: {alert}")
+            return max(0, min(100, int(base_exposure * avg_weight / 100)))
+        except Exception as e:
+            logger.warning(f"板塊分析失敗: {e}")
+            return base_exposure
+
+    # ----- reconciliation (H1) -----
+
+    def reconcile(self):
+        """Sync positions, capital and realised P&L from the broker."""
+        if not self.ibkr.is_connected():
+            if self.was_connected and RiskManager.is_market_open():
+                self.notifier.alert_disconnect("交易時段內 IBKR 連線中斷，嘗試重連")
+                self.blotter.log_event("DISCONNECT", reason="market hours")
+                self.ibkr.connect()
+            self.was_connected = self.ibkr.is_connected()
+            return
+
+        self.was_connected = True
+        try:
+            positions = self.ibkr.sync_positions()
+            prices = {s: p.get("avg_cost", 0) for s, p in positions.items()}
+            self.portfolio.sync(positions, prices)
+
+            account = self.ibkr.get_account_values()
+            if account.get("net_liquidation"):
+                self.risk_mgr.update_capital(account["net_liquidation"])
+
+            realized, new_ids, details = self.ibkr.get_realized_pnl_since(self.seen_exec_ids)
+            for fill in details:
+                self.seen_exec_ids.add(fill["exec_id"])
+                self.state.record_fill(
+                    fill["symbol"], fill["side"], fill["shares"],
+                    fill["price"], fill["realized_pnl"], fill["exec_id"],
+                )
+                self.blotter.log_fill(
+                    fill["symbol"], fill["side"], fill["shares"], fill["price"],
+                    fill["exec_id"], fill["realized_pnl"],
+                )
+            if realized:
+                ok, msg = self.risk_mgr.is_within_daily_loss_limit()
+                logger.info(f"💱 對帳已實現盈虧 ${realized:.2f} | {msg}")
+                if not ok:
+                    self.state.halt(msg)
+                    self.notifier.alert_daily_loss(msg)
+        except Exception as e:
+            logger.exception(f"對帳失敗: {e}")
+            self.notifier.alert_exception("reconcile", e)
+
+    # ----- data (H7) -----
+
+    def fetch_symbol_data(self, symbol):
+        raw = None
+        if self.ibkr.is_connected():
+            try:
+                raw = self.ibkr.get_historical_data(symbol, duration="3 M", bar_size="1 day")
+            except Exception as e:
+                logger.warning(f"{symbol} IBKR 數據錯誤: {e}")
+                raw = None
+        if raw is None or len(raw) < self.min_bars:
+            try:
+                raw = yf.download(symbol, period="3mo", interval="1d", progress=False)
+            except Exception as e:
+                logger.warning(f"{symbol} yfinance 數據錯誤: {e}")
+                raw = None
+
+        if raw is None or len(raw) == 0:
+            failures = self.data_failures.get(symbol, 0) + 1
+            self.data_failures[symbol] = failures
+            if failures >= self.max_data_failures:
+                self.notifier.alert_data_failure(symbol, failures)
+                self.blotter.log_rejection(symbol, f"數據獲取失敗 {failures} 次", stage="DATA")
+            return None
+
+        df = normalize_columns(raw)
+        report = quality_report(
+            df, min_bars=self.min_bars,
+            max_age_trading_days=self.max_age_trading_days,
+            max_daily_move_pct=self.max_daily_move_pct,
+        )
+        if not report["ok"]:
+            failures = self.data_failures.get(symbol, 0) + 1
+            self.data_failures[symbol] = failures
+            logger.warning(f"   ⏳ {symbol} 數據品質不合格 [{report['stage']}]: {report['message']}")
+            self.blotter.log_rejection(symbol, report["message"], stage="DATA_QUALITY")
+            if report["stage"] == "freshness":
+                self.notifier.alert_stale_data(symbol, report["message"])
+            elif failures >= self.max_data_failures:
+                self.notifier.alert_data_failure(symbol, failures, report["message"])
+            return None
+
+        self.data_failures[symbol] = 0
+        if "close" in df.columns:
+            self.returns_cache[symbol] = df["close"].pct_change().dropna()
+        return df
+
+    # ----- pre-trade validation (H4) -----
+
+    def validate_pre_trade(self, symbol, shares, entry, stop):
+        if shares <= 0:
+            return False, "股數為 0"
+        if shares > self.max_shares:
+            return False, f"股數 {shares} > 上限 {self.max_shares}"
+        if not stop or stop <= 0:
+            return False, "缺少有效停損價"
+        if entry <= stop:
+            return False, "進場價必須高於停損價"
+
+        cost = shares * entry
+        stop_risk = (entry - stop) * shares
+        allowed, reason = self.portfolio.can_open(symbol, cost, self.risk_mgr.total_capital, stop_risk)
+        if not allowed:
+            return False, reason
+
+        if self.auto_trade and self.ibkr.is_connected():
+            buying_power = self.ibkr.get_buying_power()
+            if buying_power and cost > buying_power:
+                return False, f"購買力不足: 需 ${cost:.2f} > 可用 ${buying_power:.2f}"
+
+        return True, "OK"
+
+    def entry_with_slippage(self, price):
+        return round(price + self.slippage_ticks * self.tick_size, 2)
+
+    # ----- trade handling -----
+
+    def handle_buy(self, symbol, signal, quant, vol_ratio):
+        entry = self.entry_with_slippage(signal["entry"])
+        stop = signal["stop"]
+        target = signal.get("target1")
+
+        shares = self.risk_mgr.calculate_position_size(entry, stop, self.price_limit, self.max_shares)
+        if self.exposure < 100:
+            shares = int(shares * self.exposure / 100)
+        scale = self.portfolio.correlation_scale(symbol, self.returns_cache)
+        if scale < 1.0:
+            shares = int(shares * scale)
+
+        ok, reason = self.validate_pre_trade(symbol, shares, entry, stop)
+        if not ok:
+            logger.info(f"   ⏳ 下單前驗證未通過: {reason}")
+            self.blotter.log_rejection(symbol, reason)
+            return
+
+        cost = shares * entry
+        logger.info("   🎯 買入信號觸發！")
+        logger.info(f"   📊 買入 {shares} 股 @ ${entry:.2f} (停損 ${stop:.2f} / 目標 ${target})")
+        logger.info(f"   💰 成本 ${cost:.2f} ({cost / self.risk_mgr.total_capital * 100:.1f}%) "
+                    f"| 風險 ${(entry - stop) * shares:.2f}")
+
+        self.notifier.send_trade_signal(
+            symbol, "BUY", entry, stop, target, signal.get("target2", target), shares
+        )
+
+        if not self.auto_trade:
+            self.blotter.log_event(
+                "SIGNAL_ONLY", symbol=symbol, reason="auto_trade 停用",
+                shares=shares, entry_price=entry, stop_price=stop, target_price=target,
+            )
+            return
+
+        bracket = None
+        if self.use_bracket_orders:
+            bracket = self.ibkr.place_bracket_order(symbol, shares, entry, stop, target, action="BUY")
+        if bracket is None:
+            logger.error(f"   ❌ {symbol} Bracket 下單失敗，未建立無保護倉位")
+            self.notifier.alert_order_issue(symbol, "Bracket 下單失敗，已跳過（避免無停損持倉）")
+            self.blotter.log_rejection(symbol, "bracket 下單失敗", stage="EXECUTION")
+            return
+
+        self.order_mgr.track_bracket(bracket)
+        self.portfolio.set_stop(symbol, stop)
+        self.blotter.log_order(
+            symbol, "BUY", shares, bracket.get("parent_id"), entry, stop, target,
+            reason=signal.get("reason", ""),
+        )
+        self.emotion.record_trade(0)
+
+    def handle_sell(self, symbol, signal, price):
+        logger.info(f"   🔴 賣出信號: {signal.get('reason', '')}")
+        quantity = self.portfolio.position_quantity(symbol)
+        if quantity <= 0:
+            logger.info(f"   ⏳ {symbol} 無持倉，僅記錄信號")
+            self.blotter.log_event("SIGNAL_NO_POSITION", symbol=symbol, reason=signal.get("reason", ""))
+            return
+
+        self.notifier.send_trade_signal(symbol, "SELL", price, price, price, price, quantity)
+        if not self.auto_trade:
+            self.blotter.log_event("SIGNAL_ONLY", symbol=symbol, reason="auto_trade 停用 (SELL)")
+            return
+
+        cancelled = self.ibkr.cancel_orders_for_symbol(symbol)
+        trade = self.ibkr.close_position(symbol, limit_price=None)
+        if trade is None:
+            self.notifier.alert_order_issue(symbol, "平倉下單失敗")
+            self.blotter.log_rejection(symbol, "平倉失敗", stage="EXECUTION")
+            return
+        self.blotter.log_order(
+            symbol, "SELL", quantity, getattr(getattr(trade, "order", None), "orderId", None),
+            price, None, None, reason=f"STRONG_SELL (取消 {cancelled} 筆掛單)",
+        )
+
+    # ----- per-symbol pipeline -----
+
+    def process_symbol(self, symbol):
+        logger.info(f"\n🔍 分析: {symbol}")
+
+        passed, reason = self.fundamental.filter(symbol)
+        if not passed:
+            logger.info(f"   ⏳ 基本面過濾: {reason}")
+            self.blotter.log_rejection(symbol, reason, stage="FUNDAMENTAL")
+            return
+
+        if getattr(self.news, "enabled", False):
+            try:
+                news_ok, news_msg = self.news.is_sentiment_ok(symbol)
+                if not news_ok:
+                    logger.info(f"   ⏳ {news_msg}")
+                    self.blotter.log_rejection(symbol, news_msg, stage="NEWS")
+                    return
+            except Exception as e:
+                logger.warning(f"新聞情緒檢查失敗 {symbol}: {e}")
+
+        df = self.fetch_symbol_data(symbol)
+        if df is None:
+            return
+
+        price = float(df["close"].iloc[-1])
+        if price <= 0 or price > self.price_limit:
+            logger.info(f"   ⏳ 股價 ${price:.2f} 超出上限 ${self.price_limit}")
+            self.blotter.log_rejection(symbol, f"股價 {price:.2f} 超出上限")
+            return
+
+        quant = QuantEngine.dynamic_score(df)
+        ma20 = float(df["close"].rolling(20).mean().iloc[-1])
+        ma50 = float(df["close"].rolling(50).mean().iloc[-1])
+        volume = float(df["volume"].iloc[-1])
+        avg_volume = float(df["volume"].rolling(5).mean().iloc[-1])
+        vol_ratio = volume / avg_volume if avg_volume > 0 else 1.0
+
+        context = MarketContext(
+            symbol=symbol, price=price, vix=self.current_vix, zscore_min=self.zscore_min,
+            exposure=self.exposure, breadth_score=self.breadth_score, quant=quant,
+            vol_ratio=vol_ratio, ma20=ma20, ma50=ma50,
+        )
+
+        can_trade, emo_msg = self.emotion.check_before_trade()
+
+        for strategy in self.strategies:
+            ok, prefilter_reason = strategy.prefilter(df, context)
+            if not ok:
+                logger.info(f"   ⏳ [{strategy.name}] {prefilter_reason}")
+                self.blotter.log_rejection(symbol, prefilter_reason, stage="PREFILTER")
                 continue
 
-            ok_drawdown, drawdown_msg = risk_mgr.check_drawdown()
-            if not ok_drawdown:
-                logger.error(f"🔴 回撤限制: {drawdown_msg}")
-                break
+            signal = strategy.generate_signal(df, context)
+            self.blotter.log_signal(symbol, signal, quant, vol_ratio, self.exposure)
 
-            ok_daily, daily_msg = risk_mgr.is_within_daily_loss_limit()
-            if not ok_daily:
-                logger.error(f"🔴 {daily_msg}")
-                break
-            logger.info(f"💰 當日 P&L: ${risk_mgr.get_daily_pnl():.2f} ({daily_msg})")
+            action = signal.get("action")
+            if action == "STRONG_BUY":
+                if not can_trade:
+                    logger.warning(f"   {emo_msg}")
+                    self.blotter.log_rejection(symbol, emo_msg, stage="EMOTION")
+                    continue
+                self.handle_buy(symbol, signal, quant, vol_ratio)
+            elif action == "STRONG_SELL":
+                self.handle_sell(symbol, signal, price)
+            else:
+                logger.info(f"   ⏳ [{strategy.name}] {signal.get('reason', '')} (RSI {quant.get('rsi', 0):.1f})")
 
+    # ----- risk gates -----
+
+    def check_gates(self):
+        """Returns (may_trade, reason). Halts on breach."""
+        if self.state.halted:
+            return False, f"系統已停機: {self.state.halt_reason}"
+
+        ok, msg = self.risk_mgr.check_drawdown()
+        if not ok:
+            self.state.halt(msg)
+            self.notifier.alert_risk_limit(msg)
+            self.blotter.log_event("HALT", reason=msg)
+            return False, msg
+
+        ok, msg = self.risk_mgr.is_within_daily_loss_limit()
+        if not ok:
+            self.state.halt(msg)
+            self.notifier.alert_daily_loss(msg)
+            self.blotter.log_event("HALT", reason=msg)
+            return False, msg
+
+        ok, msg = self.portfolio.check_book_limits(self.risk_mgr.total_capital)
+        if not ok:
+            logger.warning(f"⚠️ 組合限額: {msg}（暫停新進場）")
+            return False, msg
+
+        return True, msg
+
+    # ----- vix -----
+
+    def refresh_vix(self):
+        for attempt in range(3):
             try:
-                vix = get_vix()
-                risk_mgr.check_vix(vix)
+                data = yf.Ticker("^VIX").history(period="1d")
+                if not data.empty:
+                    self.current_vix = float(data["Close"].iloc[-1])
+                    self.risk_mgr.check_vix(self.current_vix)
+                    return self.current_vix
             except Exception as e:
-                logger.warning(f"VIX 更新失敗: {e}")
+                logger.warning(f"VIX 獲取失敗 (嘗試 {attempt + 1}/3): {e}")
+                time.sleep(1)
+        self.current_vix = getattr(self, "current_vix", 18.0)
+        self.risk_mgr.check_vix(self.current_vix)
+        return self.current_vix
 
-            for symbol in watchlist:
-                if shutdown_requested:
-                    break
-                logger.info(f"\n🔍 分析: {symbol}")
+    # ----- main loop -----
+
+    def run(self):
+        signal.signal(signal.SIGINT, self.request_shutdown)
+        signal.signal(signal.SIGTERM, self.request_shutdown)
+
+        mode = "DRY-RUN" if self.dry_run else ("AUTO-TRADE" if self.auto_trade else "SIGNAL-ONLY")
+        logger.info("=" * 60)
+        logger.info(f"🚀 V4.5 交易機器人啟動 ({mode})")
+        logger.info(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"💼 資本 ${self.risk_mgr.total_capital:.2f} | 觀察名單 {self.watchlist}")
+        logger.info("=" * 60)
+        self.notifier.alert_startup(f"模式 {mode}，資本 ${self.risk_mgr.total_capital:.2f}")
+        self.blotter.log_event("STARTUP", reason=mode)
+
+        try:
+            if not self.ibkr.connect():
+                logger.warning("⚠️ IBKR 連線失敗，將使用 yfinance（僅信號）")
+                if self.auto_trade:
+                    self.auto_trade = False
+                    self.notifier.alert_disconnect("啟動時無法連線 IBKR，auto_trade 已自動關閉")
+            else:
+                self.was_connected = True
+        except Exception as e:
+            logger.exception(f"IBKR 初始化失敗: {e}")
+            self.notifier.alert_exception("ibkr_connect", e)
+
+        self.refresh_vix()
+        self.refresh_market_context(force=True)
+        self.reconcile()
+
+        cycle = 0
+        try:
+            while not self.shutdown_requested:
+                cycle += 1
+                logger.info(f"\n🔄 第 {cycle} 次掃描 ({datetime.now().strftime('%H:%M:%S')})")
 
                 try:
-                    passed, fund_reason = fundamental.filter(symbol)
-                    if not passed:
-                        logger.info(f"   ⏳ 基本面過濾: {fund_reason}")
+                    self.state.reset_daily_if_needed()
+
+                    if self.market_hours_only and not RiskManager.is_market_open():
+                        logger.info("💤 美股已收市，暫停掃描 10 分鐘")
+                        self.publish_state()
+                        self._sleep(600)
                         continue
 
-                    raw_df = fetch_symbol_data(symbol, ibkr)
-                    if raw_df is None:
-                        logger.warning(f"{symbol} 數據不足")
-                        continue
+                    self.refresh_market_context()
+                    self.refresh_vix()
+                    self.reconcile()
 
-                    df = normalize_columns(raw_df)
-                    price = float(df["close"].iloc[-1])
+                    self.order_mgr.poll()
+                    self.order_mgr.cancel_stale()
 
-                    if price <= 0 or price > price_limit:
-                        logger.info(f"股價 ${price:.2f} 超出上限，跳過")
-                        continue
-
-                    quant = QuantEngine.dynamic_score(df)
-                    z_score = quant["z_score"]
-                    rsi = quant["rsi"]
-
-                    if z_score < zscore_min:
-                        logger.info(f"   ⏳ Z-Score {z_score:.2f} < 下限 {zscore_min}")
-                        continue
-
-                    ma20_val = float(df["close"].rolling(20).mean().iloc[-1])
-                    ma50_val = float(df["close"].rolling(50).mean().iloc[-1])
-                    if pd.isna(ma20_val) or pd.isna(ma50_val):
-                        continue
-                    if not (price > ma20_val > ma50_val):
-                        logger.info(f"   ⏳ 結構過濾失敗 (price>{ma20_val:.2f}>{ma50_val:.2f})")
-                        continue
-
-                    vol = float(df["volume"].iloc[-1])
-                    avg_vol = float(df["volume"].rolling(5).mean().iloc[-1])
-                    vol_ratio = vol / avg_vol if avg_vol > 0 else 1.0
-                    if not (vol_ratio > 1.5 or vol_ratio < 0.8):
-                        logger.info(f"   ⏳ 量比 {vol_ratio:.2f} 不符合")
-                        continue
-
-                    can_trade_emotion, emo_msg = emotion.check_before_trade()
-                    if not can_trade_emotion:
-                        logger.warning(f"   {emo_msg}")
-                        continue
-
-                    signal = TradingSignals.get_combined_signal(
-                        df, price, vix, z_score, vol_ratio, ma20_val, ma50_val,
-                        zscore_min=zscore_min,
+                    may_trade, gate_reason = self.check_gates()
+                    logger.info(
+                        f"💰 當日已實現 ${self.risk_mgr.get_daily_pnl():.2f} | "
+                        f"曝險 {self.portfolio.gross_exposure_pct(self.risk_mgr.total_capital):.1f}% | "
+                        f"持倉 {self.portfolio.open_position_count()} | 風控: {gate_reason}"
                     )
+                    if self.state.halted:
+                        logger.error(f"🔴 停機中: {self.state.halt_reason}")
+                        self.publish_state()
+                        break
 
-                    if signal["action"] == "STRONG_BUY":
-                        shares = risk_mgr.calculate_position_size(
-                            signal["entry"], signal["stop"], price_limit, max_shares
-                        )
-                        if exposure < 100:
-                            shares = int(shares * exposure / 100)
-                        if shares <= 0:
-                            logger.info("   ⏳ 曝險調整後股數為 0，跳過")
-                            continue
+                    for symbol in self.watchlist:
+                        if self.shutdown_requested:
+                            break
+                        try:
+                            if not may_trade and not self.portfolio.has_position(symbol):
+                                continue
+                            self.process_symbol(symbol)
+                        except Exception as e:
+                            logger.exception(f"分析 {symbol} 時發生錯誤: {e}")
+                            self.notifier.alert_exception(f"process_symbol:{symbol}", e)
 
-                        cost = shares * signal["entry"]
-                        logger.info("   🎯 買入信號觸發！")
-                        logger.info(f"   📊 買入 {shares} 股 @ ${signal['entry']:.2f}")
-                        logger.info(f"   🛑 止蝕: ${signal['stop']:.2f}")
-                        logger.info(f"   🎯 目標1: ${signal['target1']:.2f} | 目標2: ${signal['target2']:.2f}")
-                        logger.info(f"   💰 成本: ${cost:.2f} (佔 {cost / risk_mgr.total_capital * 100:.1f}%)")
-                        logger.info(f"   ⚠️ 風險: ${(signal['entry'] - signal['stop']) * shares:.2f}")
-                        logger.info(f"   📝 原因: {signal['reason']}")
-
-                        notifier.send_trade_signal(
-                            symbol, "BUY", signal["entry"], signal["stop"],
-                            signal["target1"], signal["target2"], shares
-                        )
-
-                        if auto_trade:
-                            try:
-                                ibkr.place_order_with_retry(
-                                    symbol, "BUY", shares, limit_price=signal["entry"]
-                                )
-                                emotion.record_trade(0)
-                                risk_mgr.today_trades += 1
-                            except Exception as e:
-                                logger.error(f"下單失敗 {symbol}: {e}")
-
-                    elif signal["action"] == "STRONG_SELL":
-                        logger.info(f"   🔴 賣出信號觸發: {signal['reason']}")
-                        notifier.send_trade_signal(
-                            symbol, "SELL", price, price * 0.98, price * 1.02, price * 1.04, 0
-                        )
-                        if auto_trade:
-                            logger.info("   自動平倉尚未實作")
-                    else:
-                        logger.info(f"   ⏳ {signal['reason']} (RSI {rsi:.1f})")
+                    self.publish_state()
 
                 except Exception as e:
-                    logger.exception(f"分析 {symbol} 時發生錯誤: {e}")
+                    logger.exception(f"掃描週期異常: {e}")
+                    self.notifier.alert_exception(f"cycle:{cycle}", e)
 
-            if shutdown_requested:
-                break
-
-            for _ in range(30):
-                if shutdown_requested:
+                if self.shutdown_requested:
                     break
-                time.sleep(10)
+                if self.max_cycles and cycle >= self.max_cycles:
+                    logger.info(f"已完成 {cycle} 次掃描（max_cycles），結束")
+                    break
+                self._sleep(self.scan_interval)
 
-    except Exception as e:
-        logger.exception(f"主循環異常: {e}")
-    finally:
-        save_state(risk_mgr, emotion)
+        except Exception as e:
+            logger.exception(f"主循環異常: {e}")
+            self.notifier.alert_exception("main_loop", e)
+        finally:
+            self.shutdown()
+
+    def publish_state(self):
+        """Persist state plus a portfolio snapshot for the dashboard."""
+        self.state.publish_portfolio(
+            self.portfolio, self.risk_mgr.total_capital, self.order_mgr.snapshot()
+        )
+        self.state.save()
+
+    def shutdown(self):
+        logger.info("正在安全關閉...")
         try:
-            ibkr.disconnect()
+            self.order_mgr.poll()
+        except Exception as e:
+            logger.warning(f"關閉時輪詢訂單失敗: {e}")
+        self.publish_state()
+        self.blotter.log_event(
+            "SHUTDOWN",
+            reason=f"daily_pnl={self.risk_mgr.get_daily_pnl():.2f}",
+            realized_pnl=self.state.total_realized_pnl,
+        )
+        try:
+            self.ibkr.disconnect()
         except Exception as e:
             logger.warning(f"IBKR 斷線時發生錯誤: {e}")
+        self.notifier.alert_shutdown(
+            f"已實現總盈虧 ${self.state.total_realized_pnl:.2f}，持倉 {self.portfolio.open_position_count()}"
+        )
         logger.info("👋 V4.5 交易機器人已安全關閉")
 
 
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="V4.5 交易機器人")
+    parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--env", default=".env")
+    parser.add_argument("--dry-run", action="store_true", help="強制僅信號模式，不下單")
+    parser.add_argument("--once", action="store_true", help="只執行一次掃描後結束")
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    config = load_config(args.config, args.env)
+    configure_logging(config.get("logging", {}))
+
+    bot = TradingBot(config, dry_run=args.dry_run)
+    if args.once:
+        bot.max_cycles = 1
+        bot.market_hours_only = False
+    bot.run()
+    return 0
+
+
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

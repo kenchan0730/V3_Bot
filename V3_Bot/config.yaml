@@ -1,12 +1,15 @@
-# V4.5 系統設定檔
+# V4.5 系統設定檔（機構級）
+# ${VAR} 會在載入時由 .env / 環境變數展開；${VAR:-default} 可指定預設值。
 
 capital:
-  total: 385.0
+  total: ${TOTAL_CAPITAL:-385.0}
 
 ibkr:
-  host: "127.0.0.1"
-  port: 7497               # 模擬盤 7497，實盤 7496
-  client_id: 1
+  host: ${IBKR_HOST:-127.0.0.1}
+  port: ${IBKR_PORT:-7497}          # 模擬 7497 / 實盤 7496 / Gateway 4002,4001
+  client_id: ${IBKR_CLIENT_ID:-1}
+  account_mode: ${IBKR_ACCOUNT_MODE:-paper}   # paper | live（實盤需明確設定）
+  max_retries: 10
 
 risk:
   max_risk_percent: 2.0
@@ -15,7 +18,33 @@ risk:
   max_position_pct: 50.0
   max_drawdown_limit: 10.0
   max_absolute_loss: 8.0
-  daily_loss_limit: 2.0    # 每日虧損上限（%）
+  daily_loss_limit: 2.0
+  vix_risk_cap: 1.5
+
+portfolio:
+  max_gross_exposure_pct: 100.0
+  max_open_positions: 5
+  max_sector_pct: 40.0
+  max_symbol_pct: 50.0
+  max_total_open_risk_pct: 6.0
+  correlation_threshold: 0.8
+  sector_map:
+    AVAH: Healthcare
+    EROC: Energy
+    QXO: Industrials
+
+execution:
+  use_bracket_orders: true
+  slippage_ticks: 1
+  tick_size: 0.01
+  order_timeout_seconds: 300
+
+data:
+  min_bars: 60
+  max_age_trading_days: 2
+  max_daily_move_pct: 40.0
+  max_consecutive_failures: 3
+  context_refresh_seconds: 3600
 
 zscore:
   window: 60
@@ -34,16 +63,28 @@ volatility:
 trading:
   price_limit: 40
   max_shares: 20
-  auto_trade: false        # true 時自動下單（謹慎啟用）
-  market_hours_only: true  # 僅在交易時段執行
+  auto_trade: false        # 僅在 H1–H10 驗證並完成紙上交易後才開啟
+  market_hours_only: true
+  scan_interval_seconds: 300
 
 watchlist:
   - "AVAH"
   - "EROC"
   - "QXO"
 
+strategies:
+  - name: v45_core
+    enabled: true
+    require_structure: true
+    min_vol_ratio_high: 1.5
+    max_vol_ratio_low: 0.8
+
 candle:
-  min_strength: 0.4        # K線形態最小強度
+  min_strength: 0.4
+
+emotion:
+  max_daily_trades: 3
+  max_loss_streak: 3
 
 fundamental:
   enabled: true
@@ -52,16 +93,39 @@ fundamental:
   max_pe: 30
   min_earnings_growth: 10
   exclude_negative_eps: true
+  cache_ttl_seconds: 86400
 
 sector:
   enabled: true
 
+news:
+  enabled: false
+  finnhub_key: ${FINNHUB_KEY:-}
+  sentiment_threshold: -0.2
+  days_to_analyze: 3
+
 notifier:
   enabled: false
+  throttle_seconds: 300
   telegram:
-    bot_token: ""
-    chat_id: ""
+    bot_token: ${TELEGRAM_BOT_TOKEN:-}
+    chat_id: ${TELEGRAM_CHAT_ID:-}
+  email:
+    enabled: false
+    smtp_server: ${SMTP_SERVER:-}
+    port: 587
+    username: ${SMTP_USERNAME:-}
+    password: ${SMTP_PASSWORD:-}
+    recipient: ${ALERT_EMAIL_RECIPIENT:-}
 
-news:
-  enabled: false           # 若無 API Key 可關閉
-  finnhub_key: ""
+logging:
+  file: logs/trading.log
+  level: INFO
+  max_bytes: 10485760      # 10 MB
+  backup_count: 5
+
+state:
+  file: logs/state.json
+
+audit:
+  blotter_file: logs/trade_blotter.csv
