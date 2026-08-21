@@ -1,5 +1,8 @@
 # V4.5 系統設定檔
 
+capital:
+  total: 385.0
+
 ibkr:
   host: "127.0.0.1"
   port: 7497               # 模擬盤 7497，實盤 7496
@@ -42,5 +45,23 @@ watchlist:
 candle:
   min_strength: 0.4        # K線形態最小強度
 
+fundamental:
+  enabled: true
+  min_market_cap: 500000000
+  min_avg_volume: 1000000
+  max_pe: 30
+  min_earnings_growth: 10
+  exclude_negative_eps: true
+
+sector:
+  enabled: true
+
+notifier:
+  enabled: false
+  telegram:
+    bot_token: ""
+    chat_id: ""
+
 news:
   enabled: false           # 若無 API Key 可關閉
+  finnhub_key: ""

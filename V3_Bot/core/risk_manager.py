@@ -4,7 +4,7 @@ import pytz
 logger = logging.getLogger(__name__)
 
 class RiskManager:
-    def __init__(self, initial_capital=385.0, max_risk_pct=2.0):
+    def __init__(self, initial_capital=385.0, max_risk_pct=2.0, daily_loss_limit=2.0):
         self.initial_capital = initial_capital
         self.total_capital = initial_capital
         self.max_risk_pct = max_risk_pct
@@ -13,7 +13,19 @@ class RiskManager:
         self.consecutive_losses = 0
         self.today_trades = 0
         self.daily_loss = 0.0
-        self.daily_loss_limit = 2.0  # %
+        self.daily_loss_limit = daily_loss_limit
+
+    def get_daily_pnl(self):
+        """Return tracked daily P&L (USD). IBKR sync can be added later."""
+        return self.daily_loss
+
+    def is_within_daily_loss_limit(self):
+        if self.total_capital <= 0:
+            return True, "OK"
+        loss_pct = (self.daily_loss / self.total_capital) * 100
+        if loss_pct < -self.daily_loss_limit:
+            return False, f"今日虧損 {loss_pct:.2f}% 已達限額"
+        return True, f"今日虧損 {loss_pct:.2f}%"
 
     def update_capital(self, new_capital):
         self.total_capital = new_capital

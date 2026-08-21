@@ -3,10 +3,10 @@ from core.data_utils import normalize_columns
 
 class TradingSignals:
     @staticmethod
-    def get_combined_signal(df, price, vix, z_score, vol_ratio, ma20, ma50):
+    def get_combined_signal(df, price, vix, z_score, vol_ratio, ma20, ma50, zscore_min=0.5):
         df = normalize_columns(df)
         candle = CandlePatterns.identify_all(df)
-        tech_bullish = (0.5 <= z_score <= 1.5 and vix <= 25 and
+        tech_bullish = (zscore_min <= z_score <= 1.5 and vix <= 25 and
                         price > ma20 > ma50 and (vol_ratio > 1.5 or vol_ratio < 0.8))
 
         if candle["signal"] == "bullish" and candle["strength"] >= 0.4 and tech_bullish:
