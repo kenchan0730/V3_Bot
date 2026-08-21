@@ -1,0 +1,55 @@
+services:
+  bot:
+    build: .
+    container_name: v45-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Reach IB Gateway through the sidecar below instead of localhost.
+      IBKR_HOST: ${IBKR_HOST:-ib-gateway}
+      IBKR_PORT: ${IBKR_PORT:-4002}
+      IBKR_ACCOUNT_MODE: ${IBKR_ACCOUNT_MODE:-paper}
+    volumes:
+      - ./logs:/app/logs
+      - ./config.yaml:/app/config.yaml:ro
+    depends_on:
+      - ib-gateway
+    command: ["python", "main.py"]
+
+  dashboard:
+    build: .
+    container_name: v45-dashboard
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./logs:/app/logs
+      - ./config.yaml:/app/config.yaml:ro
+    command: ["streamlit", "run", "app.py", "--server.address=0.0.0.0", "--server.port=8501"]
+
+  # IB Gateway sidecar.
+  #
+  # Interactive Brokers does not publish an official image, so this uses the
+  # community gnzsnz/ib-gateway build. Read its docs before production use:
+  # https://github.com/gnzsnz/ib-gateway-docker
+  #
+  # Ports: 4002 = paper API, 4001 = live API, 5900 = VNC (debugging only).
+  # TRADING_MODE must match IBKR_ACCOUNT_MODE in .env.
+  # Two-factor auth: IBKR requires periodic re-auth; for unattended running use
+  # IBKR_AUTO_RESTART_TIME and monitor the container's login state.
+  ib-gateway:
+    image: gnzsnz/ib-gateway:stable
+    container_name: v45-ib-gateway
+    restart: unless-stopped
+    environment:
+      TWS_USERID: ${TWS_USERID}
+      TWS_PASSWORD: ${TWS_PASSWORD}
+      TRADING_MODE: ${IBKR_ACCOUNT_MODE:-paper}
+      READ_ONLY_API: "no"
+      VNC_SERVER_PASSWORD: ${VNC_SERVER_PASSWORD:-}
+      TZ: America/New_York
+      IBKR_AUTO_RESTART_TIME: "11:59 PM"
+    ports:
+      - "127.0.0.1:4002:4002"
+      - "127.0.0.1:5900:5900"

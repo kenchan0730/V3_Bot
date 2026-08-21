@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11"]
+
+    defaults:
+      run:
+        working-directory: V3_Bot
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: V3_Bot/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compile all sources
+        run: python -m compileall -q core backtest main.py app.py dashboard.py
+
+      - name: Run tests with coverage
+        run: |
+          pytest --cov=core --cov=backtest \
+                 --cov-report=term-missing \
+                 --cov-report=xml \
+                 --cov-fail-under=75
+
+      - name: Verify config loads
+        run: python -c "from core.config_loader import load_config; load_config('config.yaml'); print('config OK')"
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.python-version }}
+          path: V3_Bot/coverage.xml
+          if-no-files-found: ignore
