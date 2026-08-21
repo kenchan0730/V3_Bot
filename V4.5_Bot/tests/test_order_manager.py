@@ -3,7 +3,7 @@ import time
 import pytest
 
 from core.order_manager import ManagedOrder, OrderManager
-from tests.conftest import FakeContract, FakeIB, FakeOrder, FakeTrade
+from tests.helpers import FakeContract, FakeIB, FakeOrder, FakeTrade
 
 
 class RecordingBlotter:

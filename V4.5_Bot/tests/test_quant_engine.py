@@ -2,7 +2,7 @@ import pandas as pd
 import pytest
 
 from core.quant_engine import QuantEngine
-from tests.conftest import make_ohlcv
+from tests.helpers import make_ohlcv
 
 
 def test_get_columns_returns_lowercase_names(trending_df):

@@ -13,7 +13,7 @@ from core.data_utils import (
     validate_freshness,
     validate_ohlcv,
 )
-from tests.conftest import make_ohlcv
+from tests.helpers import make_ohlcv
 
 
 @pytest.fixture

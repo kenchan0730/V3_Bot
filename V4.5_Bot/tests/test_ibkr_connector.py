@@ -3,7 +3,7 @@
 import pytest
 
 from core.ibkr_connector import IBKRConnector
-from tests.conftest import (
+from tests.helpers import (
     FakeAccountRow,
     FakeContract,
     FakeFill,

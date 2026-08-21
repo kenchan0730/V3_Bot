@@ -3,7 +3,7 @@ import pytest
 
 from backtest.engine import BacktestEngine, BacktestResult
 from core.correlation import clustered_pairs, correlation_matrix, weekly_returns
-from tests.conftest import make_ohlcv
+from tests.helpers import make_ohlcv
 
 
 CONFIG = {
