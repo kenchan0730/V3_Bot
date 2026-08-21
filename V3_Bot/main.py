@@ -19,6 +19,7 @@ from core.market_breadth import MarketBreadth
 from core.candle_patterns import CandlePatterns
 from core.trading_signals import TradingSignals
 from core.ibkr_connector import IBKRConnector  # 若不用 IBKR 可註解
+from core.data_utils import normalize_columns
 
 # 日誌設定
 logging.basicConfig(
@@ -162,6 +163,8 @@ def main():
                 if df.empty or len(df) < 60:
                     logger.warning(f"{symbol} 數據不足")
                     continue
+
+            df = normalize_columns(df)
 
             close_col = get_close_col(df)
             high_col = get_high_col(df)

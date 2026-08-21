@@ -1,18 +1,15 @@
 # core/quant_engine.py - 最終穩定版
 import pandas as pd
 import numpy as np
+from core.data_utils import normalize_columns
 
 
 class QuantEngine:
     
     @staticmethod
     def _get_columns(df):
-        """自動偵測欄位名稱大小寫"""
-        close_col = 'close' if 'close' in df.columns else 'Close'
-        high_col = 'high' if 'high' in df.columns else 'High'
-        low_col = 'low' if 'low' in df.columns else 'Low'
-        volume_col = 'volume' if 'volume' in df.columns else 'Volume'
-        return close_col, high_col, low_col, volume_col
+        normalize_columns(df)
+        return 'close', 'high', 'low', 'volume'
 
     @staticmethod
     def _to_float(val):
@@ -54,6 +51,7 @@ class QuantEngine:
 
     @staticmethod
     def dynamic_score(df):
+        df = normalize_columns(df)
         if len(df) < 60:
             return {
                 "z_score": 0.0,
