@@ -1,0 +1,34 @@
+2026-08-21 20:55:06,591 - INFO - ============================================================
+2026-08-21 20:55:06,591 - INFO - 🚀 V4.5 交易機器人啟動 (強化版)
+2026-08-21 20:55:06,591 - INFO - ⏰ 2026-08-21 20:55:06
+2026-08-21 20:55:06,591 - INFO - ============================================================
+2026-08-21 20:55:06,597 - INFO - Connecting to 127.0.0.1:7497 with clientId 1...
+2026-08-21 20:55:08,633 - INFO - Disconnecting
+2026-08-21 20:55:08,633 - ERROR - API connection failed: ConnectionRefusedError(22, '遠端電腦拒絕網路連線。', None, 1225, None)
+2026-08-21 20:55:08,633 - ERROR - Make sure API port on TWS/IBG is open
+2026-08-21 20:55:08,633 - WARNING - ⚠️ 連線失敗 (1/10): [WinError 1225] 遠端電腦拒絕網路連線。
+2026-08-21 20:55:09,637 - INFO - Connecting to 127.0.0.1:7497 with clientId 1...
+2026-08-21 20:55:11,683 - INFO - Disconnecting
+2026-08-21 20:55:11,683 - ERROR - API connection failed: ConnectionRefusedError(22, '遠端電腦拒絕網路連線。', None, 1225, None)
+2026-08-21 20:55:11,683 - ERROR - Make sure API port on TWS/IBG is open
+2026-08-21 20:55:11,683 - WARNING - ⚠️ 連線失敗 (2/10): [WinError 1225] 遠端電腦拒絕網路連線。
+2026-08-21 20:55:13,694 - INFO - Connecting to 127.0.0.1:7497 with clientId 1...
+2026-08-21 20:55:15,738 - INFO - Disconnecting
+2026-08-21 20:55:15,739 - ERROR - API connection failed: ConnectionRefusedError(22, '遠端電腦拒絕網路連線。', None, 1225, None)
+2026-08-21 20:55:15,739 - ERROR - Make sure API port on TWS/IBG is open
+2026-08-21 20:55:15,739 - WARNING - ⚠️ 連線失敗 (3/10): [WinError 1225] 遠端電腦拒絕網路連線。
+2026-08-21 20:55:19,746 - INFO - Connecting to 127.0.0.1:7497 with clientId 1...
+2026-08-21 20:55:21,760 - INFO - Disconnecting
+2026-08-21 20:55:21,760 - ERROR - API connection failed: ConnectionRefusedError(22, '遠端電腦拒絕網路連線。', None, 1225, None)
+2026-08-21 20:55:21,760 - ERROR - Make sure API port on TWS/IBG is open
+2026-08-21 20:55:21,760 - WARNING - ⚠️ 連線失敗 (4/10): [WinError 1225] 遠端電腦拒絕網路連線。
+2026-08-21 20:55:29,773 - INFO - Connecting to 127.0.0.1:7497 with clientId 1...
+2026-08-21 20:55:31,818 - INFO - Disconnecting
+2026-08-21 20:55:31,818 - ERROR - API connection failed: ConnectionRefusedError(22, '遠端電腦拒絕網路連線。', None, 1225, None)
+2026-08-21 20:55:31,818 - ERROR - Make sure API port on TWS/IBG is open
+2026-08-21 20:55:31,818 - WARNING - ⚠️ 連線失敗 (5/10): [WinError 1225] 遠端電腦拒絕網路連線。
+2026-08-21 20:55:47,820 - INFO - Connecting to 127.0.0.1:7497 with clientId 1...
+2026-08-21 20:55:49,865 - INFO - Disconnecting
+2026-08-21 20:55:49,865 - ERROR - API connection failed: ConnectionRefusedError(22, '遠端電腦拒絕網路連線。', None, 1225, None)
+2026-08-21 20:55:49,865 - ERROR - Make sure API port on TWS/IBG is open
+2026-08-21 20:55:49,865 - WARNING - ⚠️ 連線失敗 (6/10): [WinError 1225] 遠端電腦拒絕網路連線。

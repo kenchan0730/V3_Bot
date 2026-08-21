@@ -1,0 +1,46 @@
+# V4.5 系統設定檔
+
+ibkr:
+  host: "127.0.0.1"
+  port: 7497               # 模擬盤 7497，實盤 7496
+  client_id: 1
+
+risk:
+  max_risk_percent: 2.0
+  max_loss_streak: 3
+  reduced_risk_percent: 1.0
+  max_position_pct: 50.0
+  max_drawdown_limit: 10.0
+  max_absolute_loss: 8.0
+  daily_loss_limit: 2.0    # 每日虧損上限（%）
+
+zscore:
+  window: 60
+  weights:
+    momentum: 0.35
+    volume: 0.25
+    volatility: 0.20
+    relative_strength: 0.20
+  best_zone_min: 0.5
+  best_zone_max: 1.5
+  overheat_threshold: 2.5
+
+volatility:
+  vix_threshold: 25
+
+trading:
+  price_limit: 40
+  max_shares: 20
+  auto_trade: false        # true 時自動下單（謹慎啟用）
+  market_hours_only: true  # 僅在交易時段執行
+
+watchlist:
+  - "AVAH"
+  - "EROC"
+  - "QXO"
+
+candle:
+  min_strength: 0.4        # K線形態最小強度
+
+news:
+  enabled: false           # 若無 API Key 可關閉
