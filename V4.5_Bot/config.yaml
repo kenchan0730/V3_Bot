@@ -186,3 +186,52 @@ state:
 
 audit:
   blotter_file: logs/trade_blotter.csv
+
+professional_mind:
+  enabled: true
+  strategic_cash_enabled: true
+  min_regime_score_to_trade: 40
+  log_every_deliberation: false
+  journal_file: logs/execution_journal.csv
+  position_sizer:
+    enabled: true
+    atr_period: 14
+    atr_multiplier: 2.0
+    use_atr_stop: true
+    kelly_enabled: false
+    kelly_fraction: 0.25
+    kelly_win_rate: 0.45
+    kelly_avg_win: 1.5
+    kelly_avg_loss: 1.0
+    vix_scale_threshold: 25
+    vix_scale_factor: 0.7
+    max_risk_of_ruin: 0.05
+  economic_calendar:
+    enabled: true
+    risk_multiplier: 0.5
+    block_new_entries: false
+  market_structure:
+    enabled: true
+    block_distribution_entries: true
+  liquidity:
+    enabled: true
+    avoid_first_minutes: 5
+    avoid_last_minutes: 10
+  pdt:
+    enabled: true
+    min_equity: 25000
+    max_day_trades_rolling: 3
+  pyramid:
+    enabled: true
+    forbid_averaging_down: true
+    min_profit_pct_to_add: 2.0
+  portfolio_heat:
+    enabled: true
+    market_pullback_pct: 2.0
+    max_symbol_weight_pct: 35
+  themes:
+    enabled: true
+    auto_expand_watchlist: true
+    active_themes:
+      - ai_infrastructure
+      - healthcare_recovery

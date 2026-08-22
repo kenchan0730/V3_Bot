@@ -27,6 +27,7 @@ from core.news_sentiment import NewsSentiment
 from core.notifier import Notifier
 from core.order_manager import OrderManager
 from core.portfolio import Portfolio
+from core.professional_mind import ProfessionalMind
 from core.quant_engine import QuantEngine
 from core.regime import CRISIS, RegimeDetector
 from core.risk_manager import RiskManager
@@ -108,6 +109,8 @@ class TradingBot:
         )
         self.watchlist_mgr.portfolio = self.portfolio
         self.intraday = IntradayEngine(config.get("intraday", {}), ibkr=self.ibkr)
+        self.professional = ProfessionalMind(config.get("professional_mind", {}), state=self.state)
+        self.cycle_mind = None
         self.current_regime = None
         self.allow_new_entries = True
         self.allow_intraday_entries = True
@@ -194,6 +197,10 @@ class TradingBot:
                 for sym in positions:
                     if sym not in seen:
                         active.insert(0, sym)
+            theme_syms = self.professional.theme_symbols()
+            for sym in theme_syms:
+                if sym not in active:
+                    active.append(sym)
             self.watchlist = active[: int(self.watchlist_mgr.cfg.get("max_active", 20))]
             logger.info(f"📋 活躍 watchlist ({len(self.watchlist)}): {self.watchlist}")
         except Exception as e:
@@ -335,7 +342,7 @@ class TradingBot:
 
     # ----- trade handling -----
 
-    def handle_buy(self, symbol, signal, quant, vol_ratio):
+    def handle_buy(self, symbol, signal, quant, vol_ratio, df=None):
         entry = self.entry_with_slippage(signal["entry"])
         stop = signal["stop"]
         target = signal.get("target1")
@@ -363,6 +370,30 @@ class TradingBot:
         scale = self.portfolio.correlation_scale(symbol, self.returns_cache)
         if scale < 1.0:
             shares = int(shares * scale)
+
+        mind_ctx = MarketContext(
+            symbol=symbol, price=entry, vix=self.current_vix, zscore_min=self.zscore_min,
+            exposure=self.exposure, breadth_score=self.breadth_score, quant=quant,
+            regime=self.current_regime.regime if self.current_regime else "NEUTRAL",
+            allow_new_entries=self.allow_new_entries,
+        )
+        mind_decision = self.professional.approve_entry(
+            symbol, signal, df, mind_ctx, self.portfolio, self.risk_mgr,
+            entry, stop, shares, is_day_trade=False,
+        )
+        if not mind_decision.approve:
+            reason = "; ".join(mind_decision.reasons or mind_decision.thoughts or ["mind rejected"])
+            logger.info(f"   🧠 專業心態拒絕: {reason}")
+            self.blotter.log_rejection(symbol, reason, stage="MIND")
+            return
+        if mind_decision.stop_override:
+            stop = mind_decision.stop_override
+        if mind_decision.shares_scale and mind_decision.shares_scale < 1.0:
+            shares = max(1, int(shares * mind_decision.shares_scale))
+        if mind_decision.risk_multiplier < 1.0:
+            shares = max(1, int(shares * mind_decision.risk_multiplier))
+        if mind_decision.thoughts:
+            logger.info(f"   🧠 {' | '.join(mind_decision.thoughts[:3])} (exec {mind_decision.execution_score}/10)")
 
         ok, reason = self.validate_pre_trade(symbol, shares, entry, stop)
         if not ok:
@@ -493,11 +524,14 @@ class TradingBot:
                     logger.warning(f"   {emo_msg}")
                     self.blotter.log_rejection(symbol, emo_msg, stage="EMOTION")
                     continue
-                self.handle_buy(symbol, signal, quant, vol_ratio)
+                self.handle_buy(symbol, signal, quant, vol_ratio, df=df)
+                return True
             elif action == "STRONG_SELL":
                 self.handle_sell(symbol, signal, price)
+                return True
             else:
                 logger.info(f"   ⏳ [{strategy.name}] {signal.get('reason', '')} (RSI {quant.get('rsi', 0):.1f})")
+        return False
 
     # ----- risk gates -----
 
@@ -596,6 +630,19 @@ class TradingBot:
                     self.refresh_watchlist_if_due()
                     self.reconcile()
 
+                    self.cycle_mind = self.professional.deliberate_cycle(
+                        self.current_regime, self.portfolio, self.risk_mgr.total_capital,
+                        watchlist_len=len(self.watchlist),
+                    )
+                    if self.cycle_mind.action == "STRATEGIC_CASH":
+                        logger.info(
+                            f"🧠 主動空倉: {' | '.join(self.cycle_mind.thoughts[:2])}"
+                        )
+                        self.blotter.log_event(
+                            "STRATEGIC_CASH",
+                            reason=" | ".join(self.cycle_mind.thoughts[:3]),
+                        )
+
                     self.order_mgr.poll()
                     self.order_mgr.cancel_stale()
 
@@ -612,6 +659,7 @@ class TradingBot:
                         self.publish_state()
                         break
 
+                    cycle_had_setup = False
                     for symbol in self.watchlist:
                         if self.shutdown_requested:
                             break
@@ -620,10 +668,18 @@ class TradingBot:
                                 continue
                             if not self.allow_new_entries and not self.portfolio.has_position(symbol):
                                 continue
-                            self.process_symbol(symbol)
+                            if self.professional.strategic_cash_mode and not self.portfolio.has_position(symbol):
+                                continue
+                            if self.process_symbol(symbol):
+                                cycle_had_setup = True
                         except Exception as e:
                             logger.exception(f"分析 {symbol} 時發生錯誤: {e}")
                             self.notifier.alert_exception(f"process_symbol:{symbol}", e)
+
+                    if cycle_had_setup:
+                        self.professional.record_setup_found()
+                    else:
+                        self.professional.record_no_setup_cycle()
 
                     self.publish_state()
 
