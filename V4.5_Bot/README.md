@@ -43,7 +43,7 @@ core/
 
 backtest/                 # Replays history through live strategy + risk code
 docs/                     # Audit report and documentation index
-tests/                    # 380 pytest cases
+tests/                    # 459 pytest cases
 archive/                  # Modules intentionally out of the live loop
 ```
 
@@ -56,10 +56,13 @@ archive/                  # Modules intentionally out of the live loop
 3. Refresh VIX; refresh market breadth and sector exposure hourly.
 4. Reconcile with IBKR: positions, net liquidation, realised P&L from fills.
 5. Poll tracked orders; cancel any that exceeded the timeout.
+5. Verify every open position still has a working broker-side stop; re-arm it
+   if the bracket leg was cancelled or rejected.
 6. Per symbol: fundamentals → optional news → fetch data → quality gates
    (structure, freshness, outliers) → `QuantEngine` → strategy prefilter → signal.
-7. **Buy:** size via `RiskManager`, scale by exposure and correlation, run
-   pre-trade validation, then submit a **bracket order** (entry + stop + target).
+7. **Buy:** size via `RiskManager`, scale by exposure, correlation and
+   conviction grade, enforce the per-trade risk budget, run pre-trade
+   validation, then submit a **bracket order** (entry + stop + target).
 8. **Sell:** cancel working orders, then flatten the actual broker position.
 9. Write the blotter row, publish state, alert the operator.
 
@@ -67,14 +70,15 @@ archive/                  # Modules intentionally out of the live loop
 
 | Layer | Control |
 |-------|---------|
-| Per trade | Risk % of capital, stop distance sizing, price cap, max shares |
-| Position | Single-name concentration cap, no duplicate entries |
+| Per trade | Risk % of capital, stop distance sizing, price cap, max shares, dollar-risk budget check |
+| Position | Single-name concentration cap (single source of truth), no duplicate entries |
 | Sector | Per-sector exposure cap |
-| Book | Gross exposure, max open positions, total open risk |
-| Account | Daily loss limit, peak drawdown, absolute loss from initial |
+| Book | Gross exposure (tightened by regime), max open positions, total open risk |
+| Account | Daily loss limit, peak drawdown, absolute loss from initial, de-risking warning band |
 | Market | Breadth halt below 20, stricter Z-Score floor below 40, VIX risk cap |
 | Behaviour | Max daily trades, loss-streak risk reduction |
-| Execution | Broker-side stops; entry aborted if the bracket cannot be placed |
+| Conviction | Position size scales with the 1–10 confluence grade; weak setups are refused |
+| Execution | Broker-side stops; entry aborted if the bracket cannot be placed; naked-position detection with automatic stop re-arm |
 
 ---
 
@@ -86,8 +90,8 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 cp data/.env.example data/.env      # fill in credentials
-python test_setup.py      # dependency check
-pytest -q                 # 305 tests
+python scripts/diagnose_env.py      # dependency check
+pytest -q                           # 459 tests
 ```
 
 Secrets live in `data/.env` and are referenced from `config.yaml` as `${VAR}` or
@@ -123,10 +127,12 @@ Open positions keep their broker-side stops and are **not** liquidated.
 |---------|--------------|
 | `capital` | `total` |
 | `ibkr` | `host`, `port`, `account_mode` (paper/live guard) |
-| `risk` | `max_risk_percent`, `daily_loss_limit`, `max_drawdown_limit`, `max_absolute_loss` |
-| `portfolio` | `max_gross_exposure_pct`, `max_open_positions`, `max_sector_pct`, `max_total_open_risk_pct` |
+| `risk` | `max_risk_percent`, `daily_loss_limit`, `max_drawdown_limit`, `max_absolute_loss`, `drawdown_warning_pct` |
+| `portfolio` | `max_gross_exposure_pct`, `max_open_positions`, `max_sector_pct`, `max_symbol_pct` (also drives sizing), `max_total_open_risk_pct` |
 | `execution` | `use_bracket_orders`, `slippage_ticks`, `order_timeout_seconds` |
-| `data` | `min_bars`, `max_age_trading_days`, `max_daily_move_pct` |
+| `backtest` | `apply_costs`, `commission_per_share`, `use_professional_mind` |
+| `zscore` | `weights` (momentum / volume / volatility / relative_strength), `best_zone_min` |
+| `data` | `min_bars`, `max_age_trading_days`, `max_daily_move_pct`, `fetch_timeout_seconds` |
 | `trading` | `auto_trade`, `market_hours_only`, `scan_interval_seconds` |
 | `strategies` | Enabled strategy plugins |
 | `notifier` | Telegram/email alerting |
@@ -184,7 +190,9 @@ Rows carry both UTC and local timestamps and are never rewritten.
 | Document | Contents |
 |----------|----------|
 | [`RUNBOOK.md`](RUNBOOK.md) | Operations: startup, shutdown, incidents, go-live checklist |
-| [`docs/AUDIT_REPORT.md`](docs/AUDIT_REPORT.md) | Full AI audit report (baseline + fix index) |
+| [`docs/AUDIT_RESPONSE.md`](docs/AUDIT_RESPONSE.md) | Audit findings mapped to fixes, plus open items |
+| [`docs/AUDIT_REPORT.md`](docs/AUDIT_REPORT.md) | First AI audit report (baseline) |
+| [`docs/AUDIT_REPORT_V2.md`](docs/AUDIT_REPORT_V2.md) | Second, line-by-line audit (baseline) |
 | [`data/.env.example`](data/.env.example) | Required environment variables |
 | [`archive/README.md`](archive/README.md) | Modules excluded from the live loop |
 
