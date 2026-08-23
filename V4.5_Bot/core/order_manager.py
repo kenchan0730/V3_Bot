@@ -10,7 +10,10 @@ DONE_STATUSES = {"Filled", "Cancelled", "ApiCancelled", "Inactive"}
 
 
 class ManagedOrder:
-    def __init__(self, order_id, symbol, action, quantity, entry, stop, target, trade=None):
+    def __init__(
+        self, order_id, symbol, action, quantity, entry=None, stop=None, target=None,
+        trade=None, role="entry", parent_id=None,
+    ):
         self.order_id = order_id
         self.symbol = symbol
         self.action = action
@@ -19,6 +22,8 @@ class ManagedOrder:
         self.stop = stop
         self.target = target
         self.trade = trade
+        self.role = role
+        self.parent_id = parent_id
         self.filled_qty = 0.0
         self.avg_fill_price = 0.0
         self.status = "SUBMITTED"
@@ -31,6 +36,8 @@ class ManagedOrder:
 
     @property
     def is_open(self):
+        if self.role in ("stop_loss", "take_profit"):
+            return self.status not in DONE_STATUSES
         return self.status not in DONE_STATUSES and self.remaining > 0
 
     def age_seconds(self):
@@ -41,6 +48,8 @@ class ManagedOrder:
             "order_id": self.order_id,
             "symbol": self.symbol,
             "action": self.action,
+            "role": self.role,
+            "parent_id": self.parent_id,
             "quantity": self.quantity,
             "filled_qty": self.filled_qty,
             "remaining": self.remaining,
@@ -56,8 +65,8 @@ class ManagedOrder:
 class OrderManager:
     """Tracks orders from submission to terminal state.
 
-    Partial fills are surfaced via ``remaining``; stale working orders are
-    cancelled after ``timeout_seconds``.
+    Bracket orders register entry + take-profit + stop-loss legs. Protective
+    child legs are never cancelled by ``cancel_stale``.
     """
 
     def __init__(self, ibkr=None, timeout_seconds=300, blotter=None, notifier=None):
@@ -67,31 +76,81 @@ class OrderManager:
         self.notifier = notifier
         self.orders = {}
 
-    def track(self, order_id, symbol, action, quantity, entry=None, stop=None, target=None, trade=None):
+    def track(
+        self, order_id, symbol, action, quantity, entry=None, stop=None, target=None,
+        trade=None, role="entry", parent_id=None,
+    ):
         """Register an order. Re-registering the same ``order_id`` is a no-op (idempotent)."""
         existing = self.orders.get(order_id)
         if existing is not None:
             return existing
-        managed = ManagedOrder(order_id, symbol, action, quantity, entry, stop, target, trade)
+        managed = ManagedOrder(
+            order_id, symbol, action, quantity, entry, stop, target, trade,
+            role=role, parent_id=parent_id,
+        )
         self.orders[order_id] = managed
         return managed
+
+    def _leg_role(self, index):
+        if index == 0:
+            return "entry"
+        if index == 1:
+            return "take_profit"
+        return "stop_loss"
 
     def track_bracket(self, bracket):
         if not bracket:
             return None
-        return self.track(
-            bracket.get("parent_id"),
-            bracket.get("symbol"),
-            bracket.get("action", "BUY"),
-            bracket.get("quantity", 0),
-            entry=bracket.get("entry"),
-            stop=bracket.get("stop"),
-            target=bracket.get("target"),
-            trade=(bracket.get("trades") or [None])[0],
-        )
+
+        parent_id = bracket.get("parent_id")
+        symbol = bracket.get("symbol")
+        trades = bracket.get("trades") or []
+        quantity = bracket.get("quantity", 0)
+        action = bracket.get("action", "BUY")
+
+        parent = None
+        for index, trade in enumerate(trades):
+            order = getattr(trade, "order", None)
+            order_id = getattr(order, "orderId", None)
+            if order_id is None:
+                order_id = parent_id if index == 0 else f"{parent_id}-{index}"
+            leg_action = getattr(order, "action", action if index == 0 else ("SELL" if action == "BUY" else "BUY"))
+            role = self._leg_role(index)
+            managed = self.track(
+                order_id,
+                symbol,
+                leg_action,
+                quantity,
+                entry=bracket.get("entry"),
+                stop=bracket.get("stop"),
+                target=bracket.get("target"),
+                trade=trade,
+                role=role,
+                parent_id=parent_id,
+            )
+            if index == 0:
+                parent = managed
+
+        if parent is None:
+            parent = self.track(
+                parent_id,
+                symbol,
+                action,
+                quantity,
+                entry=bracket.get("entry"),
+                stop=bracket.get("stop"),
+                target=bracket.get("target"),
+                trade=trades[0] if trades else None,
+                role="entry",
+                parent_id=parent_id,
+            )
+        return parent
 
     def open_orders(self):
         return [o for o in self.orders.values() if o.is_open]
+
+    def legs_for_symbol(self, symbol):
+        return [o for o in self.orders.values() if o.symbol == symbol]
 
     def poll(self):
         """Refresh status/fills for tracked orders. Returns newly filled quantities."""
@@ -116,6 +175,7 @@ class OrderManager:
                     "order_id": managed.order_id,
                     "symbol": managed.symbol,
                     "action": managed.action,
+                    "role": managed.role,
                     "newly_filled": newly_filled,
                     "filled_qty": filled,
                     "avg_fill_price": managed.avg_fill_price,
@@ -128,22 +188,41 @@ class OrderManager:
                         managed.avg_fill_price, managed.order_id,
                         status="PARTIAL" if managed.remaining > 0 else "FILLED",
                     )
+                if managed.role in ("stop_loss", "take_profit") and self.notifier:
+                    self.notifier.alert_order_issue(
+                        managed.symbol,
+                        f"{managed.role} 腿 {managed.order_id} 狀態更新 {status}",
+                    )
 
             if status != managed.status:
                 managed.status = status
                 managed.last_update = time.time()
-                if status in ("Cancelled", "ApiCancelled", "Inactive") and self.notifier:
-                    self.notifier.alert_order_issue(
-                        managed.symbol, f"訂單 {managed.order_id} 狀態 {status}"
-                    )
+                if status in ("Cancelled", "ApiCancelled", "Inactive"):
+                    msg = f"訂單 {managed.order_id} ({managed.role}) 狀態 {status}"
+                    if managed.role == "stop_loss" and self.notifier:
+                        self.notifier.alert_order_issue(
+                            managed.symbol, f"⚠️ 停損單未被接收或已取消: {msg}"
+                        )
+                    elif self.notifier:
+                        self.notifier.alert_order_issue(managed.symbol, msg)
         return updates
 
     def cancel_stale(self):
-        """Cancel working orders older than the configured timeout."""
+        """Cancel stale entry legs only; never drop protective stop/target children."""
         cancelled = []
         for managed in self.open_orders():
+            if managed.role != "entry":
+                continue
             if managed.age_seconds() < self.timeout_seconds:
                 continue
+            if managed.filled_qty > 0:
+                logger.warning(
+                    f"⏱️ 進場部分成交保留保護腿: {managed.symbol} "
+                    f"({managed.filled_qty}/{managed.quantity})"
+                )
+                managed.status = "PartiallyFilled"
+                continue
+
             logger.warning(
                 f"⏱️ 訂單逾時取消: {managed.symbol} {managed.order_id} "
                 f"({managed.age_seconds():.0f}s, 已成交 {managed.filled_qty}/{managed.quantity})"

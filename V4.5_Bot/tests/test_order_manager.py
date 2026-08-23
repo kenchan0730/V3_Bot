@@ -52,13 +52,40 @@ def test_track_is_idempotent(manager):
 
 
 def test_track_bracket(manager):
+    trades = [make_trade(), make_trade(), make_trade()]
+    trades[0].order.orderId = 7
+    trades[1].order.orderId = 8
+    trades[2].order.orderId = 9
     bracket = {
         "parent_id": 7, "symbol": "AVAH", "action": "BUY", "quantity": 5,
-        "entry": 12.0, "stop": 11.0, "target": 14.0, "trades": [make_trade()],
+        "entry": 12.0, "stop": 11.0, "target": 14.0, "trades": trades,
     }
     order = manager.track_bracket(bracket)
     assert order.order_id == 7
     assert order.stop == 11.0
+    assert len(manager.orders) == 3
+    assert manager.orders[7].role == "entry"
+    assert manager.orders[8].role == "take_profit"
+    assert manager.orders[9].role == "stop_loss"
+
+
+def test_cancel_stale_skips_protective_legs():
+    manager = OrderManager(ibkr=None, timeout_seconds=0)
+    manager.track(8, "AVAH", "SELL", 5, role="take_profit", parent_id=7, trade=make_trade())
+    manager.track(9, "AVAH", "SELL", 5, role="stop_loss", parent_id=7, trade=make_trade())
+    assert manager.cancel_stale() == []
+    assert manager.orders[8].status == "SUBMITTED"
+    assert manager.orders[9].status == "SUBMITTED"
+
+
+def test_cancel_stale_keeps_partial_entry():
+    manager = OrderManager(ibkr=None, timeout_seconds=0)
+    trade = make_trade(filled=3, avg_price=12.0)
+    manager.track(7, "AVAH", "BUY", 5, role="entry", trade=trade)
+    manager.orders[7].filled_qty = 3
+    cancelled = manager.cancel_stale()
+    assert cancelled == []
+    assert manager.orders[7].status == "PartiallyFilled"
 
 
 def test_track_bracket_none(manager):
@@ -110,6 +137,13 @@ def test_poll_alerts_on_cancellation(manager):
     manager.track(1, "AVAH", "BUY", 10, trade=trade)
     manager.poll()
     assert manager.notifier.alerts
+
+
+def test_poll_alerts_on_stop_loss_cancellation(manager):
+    trade = make_trade(status="Cancelled")
+    manager.track(9, "AVAH", "SELL", 10, role="stop_loss", parent_id=7, trade=trade)
+    manager.poll()
+    assert any("停損" in msg for _, msg in manager.notifier.alerts)
 
 
 def test_cancel_stale_cancels_old_orders():

@@ -125,6 +125,20 @@ def test_check_book_limits_blocks_gross(portfolio):
     assert ok is False and "曝險" in reason
 
 
+def test_check_book_limits_respects_gross_override(portfolio):
+    portfolio.sync({"AAA": {"quantity": 30, "avg_cost": 10.0}}, {"AAA": 10.0})
+    ok_default, _ = portfolio.check_book_limits(1000.0)
+    ok_tight, reason = portfolio.check_book_limits(1000.0, max_gross_pct_override=25.0)
+    assert ok_default is True
+    assert ok_tight is False and "曝險" in reason
+
+
+def test_can_open_passes_gross_override(portfolio):
+    portfolio.sync({"AAA": {"quantity": 22, "avg_cost": 10.0}}, {"AAA": 10.0})
+    allowed, reason = portfolio.can_open("BBB", 50.0, 1000.0, stop_risk=5.0, max_gross_pct_override=25.0)
+    assert allowed is False and "曝險" in reason
+
+
 # ----- correlation -----
 
 def test_correlation_scale_halves_for_correlated(portfolio):

@@ -21,6 +21,7 @@ from core.portfolio_analytics import PortfolioHeatMonitor
 from core.position_sizer import DynamicPositionSizer
 from core.pyramid_manager import PyramidManager
 from core.regime import CRISIS, RISK_OFF
+from core.signal_utils import parse_confidence
 from core.theme_registry import ThemeRegistry
 
 logger = logging.getLogger(__name__)
@@ -263,7 +264,7 @@ class ProfessionalMind:
 
     def _score_execution(self, signal, context, thoughts):
         score = 7
-        conf = float(signal.get("confidence", 0.5) or 0.5)
+        conf = parse_confidence(signal.get("confidence"), default=0.5)
         if conf >= 0.8:
             score += 1
         if getattr(context, "regime", "") == "RISK_ON":

@@ -187,12 +187,12 @@ class IntradayEngine:
                     "entry_price": proposed_entry, "metrics": metrics, "vwap": vwap, "opening_range": orb}
 
         adjusted = proposed_entry
-        pullback = float(self.cfg["vwap_pullback_pct"]) / 100.0
+        pullback_pct = float(self.cfg["vwap_pullback_pct"]) / 100.0
         if last_close > vwap:
-            target = vwap * (1.0 + pullback * 0.01)
+            target = vwap * (1.0 + pullback_pct)
             adjusted = min(proposed_entry, round(max(vwap, target), 2))
         else:
-            adjusted = min(proposed_entry, round(vwap * (1.0 + pullback * 0.01), 2))
+            adjusted = min(proposed_entry, round(vwap * (1.0 + pullback_pct), 2))
 
         if self.cfg.get("allow_opening_range_breakout") and orb:
             if last_close > orb["high"]:

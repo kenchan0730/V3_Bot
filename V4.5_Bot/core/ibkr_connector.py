@@ -298,14 +298,19 @@ class IBKRConnector:
                 logger.warning(f"bracketOrder 不可用，改用手動建構: {e}")
 
         exit_action = "SELL" if action.upper() == "BUY" else "BUY"
+        oca_group = f"OCA_{int(time.time())}"
         parent = LimitOrder(action, quantity, entry_price)
         parent.transmit = False
         take_profit = LimitOrder(exit_action, quantity, target_price)
         take_profit.parentId = getattr(parent, "orderId", None)
         take_profit.transmit = False
+        take_profit.ocaGroup = oca_group
+        take_profit.ocaType = 1
         stop_loss = StopOrder(exit_action, quantity, stop_price)
         stop_loss.parentId = getattr(parent, "orderId", None)
         stop_loss.transmit = True
+        stop_loss.ocaGroup = oca_group
+        stop_loss.ocaType = 1
         return [parent, take_profit, stop_loss]
 
     def place_order_with_retry(self, symbol, action, quantity, order_type="LMT",

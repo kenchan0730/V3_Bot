@@ -271,13 +271,13 @@ class TradingBot:
         raw = None
         if self.ibkr.is_connected():
             try:
-                raw = self.ibkr.get_historical_data(symbol, duration="3 M", bar_size="1 day")
+                raw = self.ibkr.get_historical_data(symbol, duration="6 M", bar_size="1 day")
             except Exception as e:
                 logger.warning(f"{symbol} IBKR 數據錯誤: {e}")
                 raw = None
         if raw is None or len(raw) < self.min_bars:
             try:
-                raw = yf.download(symbol, period="3mo", interval="1d", progress=False)
+                raw = yf.download(symbol, period="6mo", interval="1d", progress=False)
             except Exception as e:
                 logger.warning(f"{symbol} yfinance 數據錯誤: {e}")
                 raw = None
@@ -312,6 +312,10 @@ class TradingBot:
             self.returns_cache[symbol] = df["close"].pct_change().dropna()
         return df
 
+    def _effective_gross_cap(self):
+        """Tighten book gross limit by regime exposure (e.g. RISK_OFF 25%)."""
+        return min(self.portfolio.max_gross_exposure_pct, float(self.exposure))
+
     # ----- pre-trade validation (H4) -----
 
     def validate_pre_trade(self, symbol, shares, entry, stop):
@@ -326,7 +330,10 @@ class TradingBot:
 
         cost = shares * entry
         stop_risk = (entry - stop) * shares
-        allowed, reason = self.portfolio.can_open(symbol, cost, self.risk_mgr.total_capital, stop_risk)
+        allowed, reason = self.portfolio.can_open(
+            symbol, cost, self.risk_mgr.total_capital, stop_risk,
+            max_gross_pct_override=self._effective_gross_cap(),
+        )
         if not allowed:
             return False, reason
 
@@ -554,7 +561,10 @@ class TradingBot:
             self.blotter.log_event("HALT", reason=msg)
             return False, msg
 
-        ok, msg = self.portfolio.check_book_limits(self.risk_mgr.total_capital)
+        ok, msg = self.portfolio.check_book_limits(
+            self.risk_mgr.total_capital,
+            max_gross_pct_override=self._effective_gross_cap(),
+        )
         if not ok:
             logger.warning(f"⚠️ 組合限額: {msg}（暫停新進場）")
             return False, msg

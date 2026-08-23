@@ -62,3 +62,16 @@ def test_evaluate_entry_rejects_far_from_vwap(engine, monkeypatch):
     monkeypatch.setattr(engine, "in_trade_window", lambda now=None: (True, "OK"))
     result = engine.evaluate_entry("TEST", "STRONG_BUY", 15.0, df=df)
     assert result["ok"] is False
+
+
+def test_vwap_pullback_uses_percent_not_double_scaled(engine, monkeypatch):
+    df = _sample_intraday()
+    engine.cfg["vwap_pullback_pct"] = 0.8
+    monkeypatch.setattr(engine, "in_trade_window", lambda now=None: (True, "OK"))
+    vwap = float(engine.compute_vwap(df).iloc[-1])
+    proposed = vwap * 1.05
+    result = engine.evaluate_entry("TEST", "STRONG_BUY", proposed, df=df)
+    assert result["ok"] is True
+    expected_cap = round(vwap * 1.008, 2)
+    assert result["entry_price"] == pytest.approx(expected_cap, abs=0.02)
+    assert result["entry_price"] > vwap * 1.001

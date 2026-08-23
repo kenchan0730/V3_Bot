@@ -2,7 +2,7 @@
 # ${VAR} 會在載入時由 .env / 環境變數展開；${VAR:-default} 可指定預設值。
 
 capital:
-  total: ${TOTAL_CAPITAL:-385.0}
+  total: ${TOTAL_CAPITAL:-1275.0}
 
 ibkr:
   host: ${IBKR_HOST:-127.0.0.1}
@@ -15,7 +15,7 @@ risk:
   max_risk_percent: 2.0
   max_loss_streak: 3
   reduced_risk_percent: 1.0
-  max_position_pct: 50.0
+  max_position_pct: 20.0
   max_drawdown_limit: 10.0
   max_absolute_loss: 8.0
   daily_loss_limit: 2.0
@@ -25,13 +25,21 @@ portfolio:
   max_gross_exposure_pct: 100.0
   max_open_positions: 5
   max_sector_pct: 40.0
-  max_symbol_pct: 50.0
+  max_symbol_pct: 20.0
   max_total_open_risk_pct: 6.0
   correlation_threshold: 0.8
   sector_map:
     AVAH: Healthcare
     EROC: Energy
     QXO: Industrials
+    F: Consumer Cyclical
+    SOFI: Financial Services
+    PLUG: Industrials
+    SNAP: Communication Services
+    HOOD: Financial Services
+    NIO: Consumer Cyclical
+    INTC: Technology
+    AAL: Industrials
 
 execution:
   use_bracket_orders: true

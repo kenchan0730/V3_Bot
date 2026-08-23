@@ -118,26 +118,31 @@ class Portfolio:
 
     # ----- limit checks -----
 
-    def check_book_limits(self, total_capital):
+    def check_book_limits(self, total_capital, max_gross_pct_override=None):
         """Book-wide gate evaluated before considering any new entry."""
+        gross_cap = (
+            float(max_gross_pct_override)
+            if max_gross_pct_override is not None
+            else self.max_gross_exposure_pct
+        )
         if self.open_position_count() >= self.max_open_positions:
             return False, f"持倉數 {self.open_position_count()} 已達上限 {self.max_open_positions}"
         gross_pct = self.gross_exposure_pct(total_capital)
-        if gross_pct >= self.max_gross_exposure_pct:
-            return False, f"總曝險 {gross_pct:.1f}% 已達上限 {self.max_gross_exposure_pct}%"
+        if gross_pct >= gross_cap:
+            return False, f"總曝險 {gross_pct:.1f}% 已達上限 {gross_cap}%"
         risk_pct = self.open_risk_pct(total_capital)
         if risk_pct >= self.max_total_open_risk_pct:
             return False, f"未平倉風險 {risk_pct:.2f}% 已達上限 {self.max_total_open_risk_pct}%"
         return True, "OK"
 
-    def can_open(self, symbol, cost, total_capital, stop_risk=0.0):
+    def can_open(self, symbol, cost, total_capital, stop_risk=0.0, max_gross_pct_override=None):
         """Per-candidate gate. Returns (allowed, reason)."""
         if total_capital <= 0:
             return False, "資本為零"
         if self.has_position(symbol):
             return False, f"{symbol} 已有持倉，避免重複進場"
 
-        ok_book, book_reason = self.check_book_limits(total_capital)
+        ok_book, book_reason = self.check_book_limits(total_capital, max_gross_pct_override)
         if not ok_book:
             return False, book_reason
 
@@ -146,8 +151,13 @@ class Portfolio:
             return False, f"單一標的 {symbol_pct:.1f}% > 上限 {self.max_symbol_pct}%"
 
         projected_gross = (self.gross_exposure() + cost) / total_capital * 100
-        if projected_gross > self.max_gross_exposure_pct:
-            return False, f"進場後總曝險 {projected_gross:.1f}% > 上限 {self.max_gross_exposure_pct}%"
+        gross_cap = (
+            float(max_gross_pct_override)
+            if max_gross_pct_override is not None
+            else self.max_gross_exposure_pct
+        )
+        if projected_gross > gross_cap:
+            return False, f"進場後總曝險 {projected_gross:.1f}% > 上限 {gross_cap}%"
 
         sector = self.sector_of(symbol)
         sector_value = self.sector_exposure().get(sector, 0.0) + cost
