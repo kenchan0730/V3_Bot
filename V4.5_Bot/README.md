@@ -42,7 +42,8 @@ core/
   correlation.py          # Weekly-returns correlation matrix
 
 backtest/                 # Replays history through live strategy + risk code
-tests/                    # 305 pytest cases
+docs/                     # Audit report and documentation index
+tests/                    # 380 pytest cases
 archive/                  # Modules intentionally out of the live loop
 ```
 
@@ -183,6 +184,7 @@ Rows carry both UTC and local timestamps and are never rewritten.
 | Document | Contents |
 |----------|----------|
 | [`RUNBOOK.md`](RUNBOOK.md) | Operations: startup, shutdown, incidents, go-live checklist |
+| [`docs/AUDIT_REPORT.md`](docs/AUDIT_REPORT.md) | Full AI audit report (baseline + fix index) |
 | [`data/.env.example`](data/.env.example) | Required environment variables |
 | [`archive/README.md`](archive/README.md) | Modules excluded from the live loop |
 
