@@ -10,7 +10,7 @@ DEFAULT_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 def configure_logging(config=None):
     """Attach a rotating file handler plus console handler to the root logger."""
     cfg = config or {}
-    log_path = Path(cfg.get("file", "logs/trading.log"))
+    log_path = Path(cfg.get("file", "data/trading.log"))
     max_bytes = int(cfg.get("max_bytes", 10 * 1024 * 1024))
     backup_count = int(cfg.get("backup_count", 5))
     level = getattr(logging, str(cfg.get("level", "INFO")).upper(), logging.INFO)

@@ -3,14 +3,14 @@ services:
     build: .
     container_name: v45-bot
     restart: unless-stopped
-    env_file: .env
+    env_file: data/.env
     environment:
       # Reach IB Gateway through the sidecar below instead of localhost.
       IBKR_HOST: ${IBKR_HOST:-ib-gateway}
       IBKR_PORT: ${IBKR_PORT:-4002}
       IBKR_ACCOUNT_MODE: ${IBKR_ACCOUNT_MODE:-paper}
     volumes:
-      - ./logs:/app/logs
+      - ./data:/app/data
       - ./config.yaml:/app/config.yaml:ro
     depends_on:
       - ib-gateway
@@ -20,11 +20,11 @@ services:
     build: .
     container_name: v45-dashboard
     restart: unless-stopped
-    env_file: .env
+    env_file: data/.env
     ports:
       - "8501:8501"
     volumes:
-      - ./logs:/app/logs
+      - ./data:/app/data
       - ./config.yaml:/app/config.yaml:ro
     command: ["streamlit", "run", "app.py", "--server.address=0.0.0.0", "--server.port=8501"]
 

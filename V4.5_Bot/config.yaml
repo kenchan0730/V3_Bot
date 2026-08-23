@@ -128,7 +128,7 @@ watchlist:
   max_core: 5
   max_satellite: 12
   refresh_hours: 168           # 每週刷新 satellite（0 = 關閉自動刷新）
-  persist_file: logs/watchlist.json
+  persist_file: data/watchlist.json
   correlation_threshold: 0.78
   scanner:
     enabled: true
@@ -184,23 +184,23 @@ notifier:
     recipient: ${ALERT_EMAIL_RECIPIENT:-}
 
 logging:
-  file: logs/trading.log
+  file: data/trading.log
   level: INFO
   max_bytes: 10485760      # 10 MB
   backup_count: 5
 
 state:
-  file: logs/state.json
+  file: data/state.json
 
 audit:
-  blotter_file: logs/trade_blotter.csv
+  blotter_file: data/trade_blotter.csv
 
 professional_mind:
   enabled: true
   strategic_cash_enabled: true
   min_regime_score_to_trade: 40
   log_every_deliberation: false
-  journal_file: logs/execution_journal.csv
+  journal_file: data/execution_journal.csv
   position_sizer:
     enabled: true
     atr_period: 14

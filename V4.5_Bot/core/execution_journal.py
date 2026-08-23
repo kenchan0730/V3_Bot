@@ -33,7 +33,7 @@ JOURNAL_FIELDS = [
 class ExecutionJournal:
     """Append-only professional post-mortem log (separate from trade blotter)."""
 
-    def __init__(self, path="logs/execution_journal.csv"):
+    def __init__(self, path="data/execution_journal.csv"):
         self.path = Path(path)
         self._ensure_header()
 

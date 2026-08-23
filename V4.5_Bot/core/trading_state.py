@@ -15,7 +15,7 @@ SCHEMA_VERSION = 2
 
 
 class TradingState:
-    def __init__(self, initial_capital=385.0, state_file="logs/state.json"):
+    def __init__(self, initial_capital=385.0, state_file="data/state.json"):
         self.initial_capital = float(initial_capital)
         self.total_capital = float(initial_capital)
         self.peak_capital = float(initial_capital)

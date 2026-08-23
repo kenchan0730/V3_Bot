@@ -20,6 +20,10 @@ htmlcov/
 coverage.xml
 
 logs/
+V4.5_Bot/data/*
+!V4.5_Bot/data/.gitignore
+!V4.5_Bot/data/README.md
+!V4.5_Bot/data/.env.example
 state.json
 *.log
 

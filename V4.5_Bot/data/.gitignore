@@ -1,0 +1,5 @@
+# Personal / runtime data — never commit secrets or live trading records.
+*
+!.gitignore
+!README.md
+!.env.example

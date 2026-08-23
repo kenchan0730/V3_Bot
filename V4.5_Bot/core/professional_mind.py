@@ -49,7 +49,7 @@ class ProfessionalMind:
         "min_regime_score_to_trade": 40,
         "require_accumulation_phase": False,
         "log_every_deliberation": True,
-        "journal_file": "logs/execution_journal.csv",
+        "journal_file": "data/execution_journal.csv",
         "consecutive_no_trade_days_goal": 3,
     }
 
@@ -67,7 +67,7 @@ class ProfessionalMind:
         self.pyramid = PyramidManager(sub.get("pyramid") or cfg.get("pyramid"))
         self.heat = PortfolioHeatMonitor(sub.get("portfolio_heat") or cfg.get("portfolio_heat"))
         self.themes = ThemeRegistry(sub.get("themes") or cfg.get("themes"))
-        self.journal = ExecutionJournal(cfg.get("journal_file", "logs/execution_journal.csv"))
+        self.journal = ExecutionJournal(cfg.get("journal_file", "data/execution_journal.csv"))
 
         self._cycles_without_setup = 0
         self._strategic_cash = False

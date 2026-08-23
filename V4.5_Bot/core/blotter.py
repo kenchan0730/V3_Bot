@@ -39,7 +39,7 @@ FIELDS = [
 class Blotter:
     """CSV blotter opened in append mode; rows are never rewritten."""
 
-    def __init__(self, path="logs/trade_blotter.csv"):
+    def __init__(self, path="data/trade_blotter.csv"):
         self.path = Path(path)
         self._ensure_header()
 

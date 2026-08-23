@@ -30,7 +30,7 @@ class WatchlistManager:
         "max_satellite": 12,
         "max_core": 8,
         "refresh_hours": 168,
-        "persist_file": "logs/watchlist.json",
+        "persist_file": "data/watchlist.json",
         "scanner": {},
         "rank_by": "z_score",
         "correlation_threshold": 0.78,
@@ -50,7 +50,7 @@ class WatchlistManager:
         self._load_persisted()
 
     def _load_persisted(self):
-        path = Path(self.cfg.get("persist_file", "logs/watchlist.json"))
+        path = Path(self.cfg.get("persist_file", "data/watchlist.json"))
         if not path.exists():
             return
         try:
@@ -62,7 +62,7 @@ class WatchlistManager:
             logger.warning(f"watchlist persist load failed: {exc}")
 
     def _save_persisted(self, active, meta=None):
-        path = Path(self.cfg.get("persist_file", "logs/watchlist.json"))
+        path = Path(self.cfg.get("persist_file", "data/watchlist.json"))
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "updated_at": datetime.now().isoformat(timespec="seconds"),

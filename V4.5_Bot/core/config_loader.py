@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 _VAR_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)(?::-([^}]*))?\}")
 
 
-def load_dotenv(path=".env"):
+def load_dotenv(path="data/.env"):
     """Minimal .env loader. Uses python-dotenv when available, else parses manually."""
     try:
         from dotenv import load_dotenv as _load
@@ -74,7 +74,7 @@ def _walk(node):
     return _expand(node)
 
 
-def load_config(path="config.yaml", env_path=".env"):
+def load_config(path="config.yaml", env_path="data/.env"):
     """Load YAML config, expanding ${VAR} placeholders from the environment."""
     load_dotenv(env_path)
     with open(path, "r", encoding="utf-8") as f:

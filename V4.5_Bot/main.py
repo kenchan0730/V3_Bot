@@ -78,12 +78,12 @@ class TradingBot:
 
         self.state = TradingState(
             initial_capital=total_capital,
-            state_file=config.get("state", {}).get("file", "logs/state.json"),
+            state_file=config.get("state", {}).get("file", "data/state.json"),
         )
         self.state.load()
 
         self.notifier = Notifier(config.get("notifier", {}))
-        self.blotter = Blotter(config.get("audit", {}).get("blotter_file", "logs/trade_blotter.csv"))
+        self.blotter = Blotter(config.get("audit", {}).get("blotter_file", "data/trade_blotter.csv"))
         self.risk_mgr = RiskManager(
             initial_capital=total_capital,
             config={**risk_cfg, "vix_threshold": (config.get("volatility", {}) or {}).get("vix_threshold", 25)},
@@ -745,7 +745,7 @@ class TradingBot:
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="V4.5 交易機器人")
     parser.add_argument("--config", default="config.yaml")
-    parser.add_argument("--env", default=".env")
+    parser.add_argument("--env", default="data/.env")
     parser.add_argument("--dry-run", action="store_true", help="強制僅信號模式，不下單")
     parser.add_argument("--once", action="store_true", help="只執行一次掃描後結束")
     return parser.parse_args(argv)

@@ -21,7 +21,7 @@ from core.trading_state import TradingState
 @st.cache_data(ttl=60)
 def cached_config():
     try:
-        return load_config("config.yaml", ".env")
+        return load_config("config.yaml", "data/.env")
     except Exception as exc:
         st.warning(f"設定載入失敗: {exc}")
         return {}
@@ -53,7 +53,7 @@ def cached_breadth():
 
 
 def load_state(config):
-    path = Path(config.get("state", {}).get("file", "logs/state.json"))
+    path = Path(config.get("state", {}).get("file", "data/state.json"))
     if not path.exists():
         return None, path
     try:
@@ -63,7 +63,7 @@ def load_state(config):
 
 
 def load_blotter(config, tail=25):
-    path = Path(config.get("audit", {}).get("blotter_file", "logs/trade_blotter.csv"))
+    path = Path(config.get("audit", {}).get("blotter_file", "data/trade_blotter.csv"))
     if not path.exists():
         return None
     try:

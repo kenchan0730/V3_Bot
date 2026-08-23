@@ -78,7 +78,7 @@ def test_defaults_when_config_missing(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     root = configure_logging()
     assert len(root.handlers) == 2
-    assert (tmp_path / "logs").exists()
+    assert (tmp_path / "data").exists()
 
 
 def test_noisy_libraries_are_quieted(tmp_path):

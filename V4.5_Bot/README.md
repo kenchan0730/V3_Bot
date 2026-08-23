@@ -16,7 +16,7 @@ main.py                   # TradingBot orchestrator: gates, scan loop, execution
 app.py                    # Streamlit entry point (navigation)
 dashboard.py              # Dashboard: bot state, P&L, positions, signals, blotter
 config.yaml               # All settings; supports ${ENV_VAR} expansion
-.env                      # Secrets (gitignored; see .env.example)
+data/                     # Personal/runtime data (.env, state, blotter, logs) — see data/README.md
 
 core/
   config_loader.py        # YAML + .env loading with ${VAR} expansion
@@ -44,7 +44,6 @@ core/
 backtest/                 # Replays history through live strategy + risk code
 tests/                    # 305 pytest cases
 archive/                  # Modules intentionally out of the live loop
-logs/                     # trading.log, state.json, trade_blotter.csv
 ```
 
 ---
@@ -85,12 +84,12 @@ cd V4.5_Bot
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-cp .env.example .env      # fill in credentials
+cp data/.env.example data/.env      # fill in credentials
 python test_setup.py      # dependency check
 pytest -q                 # 305 tests
 ```
 
-Secrets live in `.env` and are referenced from `config.yaml` as `${VAR}` or
+Secrets live in `data/.env` and are referenced from `config.yaml` as `${VAR}` or
 `${VAR:-default}`. Requires Python 3.10+.
 
 ---
@@ -165,7 +164,7 @@ strategies:
 
 ## Audit trail
 
-`logs/trade_blotter.csv` is append-only, one row per decision:
+`data/trade_blotter.csv` is append-only, one row per decision:
 
 | Event | Meaning |
 |-------|---------|
@@ -184,7 +183,7 @@ Rows carry both UTC and local timestamps and are never rewritten.
 | Document | Contents |
 |----------|----------|
 | [`RUNBOOK.md`](RUNBOOK.md) | Operations: startup, shutdown, incidents, go-live checklist |
-| [`.env.example`](.env.example) | Required environment variables |
+| [`data/.env.example`](data/.env.example) | Required environment variables |
 | [`archive/README.md`](archive/README.md) | Modules excluded from the live loop |
 
 ---

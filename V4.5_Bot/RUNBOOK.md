@@ -25,13 +25,13 @@ cd V4.5_Bot
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-cp .env.example .env        # then edit .env
+cp data/.env.example data/.env        # then edit data/.env
 python test_setup.py        # verify dependencies
 pytest -q                   # verify logic
 python main.py --once --dry-run   # end-to-end smoke test
 ```
 
-### Required `.env` values
+### Required `data/.env` values
 
 | Variable | Purpose |
 |----------|---------|
@@ -41,7 +41,7 @@ python main.py --once --dry-run   # end-to-end smoke test
 | `TOTAL_CAPITAL` | Starting capital |
 | `FINNHUB_KEY` | Optional, news sentiment gate |
 
-Never commit `.env`. It is gitignored.
+Never commit `data/.env`. It is gitignored.
 
 ### Port reference
 
@@ -64,7 +64,7 @@ live port.
 python main.py
 
 # Background (Linux/macOS)
-nohup python main.py >> logs/stdout.log 2>&1 &
+nohup python main.py >> data/stdout.log 2>&1 &
 
 # Docker
 docker compose up -d bot dashboard
@@ -75,7 +75,7 @@ Confirm a healthy start:
 1. Log shows `🚀 V4.5 交易機器人啟動` with the expected mode.
 2. Log shows `✅ IBKR 已連線` (or a deliberate signal-only warning).
 3. Market breadth and exposure lines appear.
-4. `logs/state.json` timestamp updates each cycle.
+4. `data/state.json` timestamp updates each cycle.
 5. Startup alert arrives on Telegram (if enabled).
 
 ---
@@ -86,7 +86,7 @@ Send `Ctrl+C` (SIGINT) or `SIGTERM`. The bot then:
 
 1. Stops accepting new symbols.
 2. Polls order status one final time.
-3. Writes `logs/state.json` including the portfolio snapshot.
+3. Writes `data/state.json` including the portfolio snapshot.
 4. Disconnects from IBKR.
 5. Sends a shutdown alert.
 
@@ -129,7 +129,7 @@ python -c "from core.config_loader import load_config; print(load_config('config
 - [ ] `IBKR_ACCOUNT_MODE=paper` and a paper port are configured.
 - [ ] `python main.py --once` connects and logs `✅ IBKR 已連線`.
 - [ ] Telegram alerts confirmed working (`notifier.enabled: true`).
-- [ ] `logs/trade_blotter.csv` records SIGNAL and REJECT rows.
+- [ ] `data/trade_blotter.csv` records SIGNAL and REJECT rows.
 - [ ] `portfolio.max_open_positions` and `max_gross_exposure_pct` reviewed.
 - [ ] `risk.daily_loss_limit` and `max_drawdown_limit` reviewed.
 - [ ] Ran unattended on **paper** for one full trading week.
@@ -145,16 +145,16 @@ python -c "from core.config_loader import load_config; print(load_config('config
 
 | File | Contents |
 |------|----------|
-| `logs/trading.log` | Application log, rotated at 10 MB × 5 |
-| `logs/state.json` | Capital, P&L, counters, positions, open orders |
-| `logs/trade_blotter.csv` | Immutable audit trail |
+| `data/trading.log` | Application log, rotated at 10 MB × 5 |
+| `data/state.json` | Capital, P&L, counters, positions, open orders |
+| `data/trade_blotter.csv` | Immutable audit trail |
 
 ### Quick checks
 
 ```bash
-tail -f logs/trading.log
-python -c "import json;d=json.load(open('logs/state.json'));print(d['saved_at'],d['total_capital'],d['daily_realized_pnl'],d['halted'])"
-grep -c REJECT logs/trade_blotter.csv
+tail -f data/trading.log
+python -c "import json;d=json.load(open('data/state.json'));print(d['saved_at'],d['total_capital'],d['daily_realized_pnl'],d['halted'])"
+grep -c REJECT data/trade_blotter.csv
 streamlit run app.py        # visual dashboard
 ```
 
@@ -179,7 +179,7 @@ Alerts are throttled to one per key per `notifier.throttle_seconds` (default
 
 ### 8.1 Bot halted on daily loss limit
 
-The halt persists in `logs/state.json` (`halted: true`) and survives restart
+The halt persists in `data/state.json` (`halted: true`) and survives restart
 until the next trading day.
 
 1. Read `halt_reason`.
@@ -190,7 +190,7 @@ until the next trading day.
 ```bash
 python -c "
 import json
-p='logs/state.json'
+p='data/state.json'
 d=json.load(open(p))
 d['halted']=False; d['halt_reason']=''
 json.dump(d,open(p,'w'),indent=2)
@@ -230,7 +230,7 @@ Symptoms: `數據過期` or `單日波動 ... 疑似錯誤數據`.
 The loader falls back to config defaults and logs a warning.
 
 ```bash
-mv logs/state.json logs/state.json.bad
+mv data/state.json data/state.json.bad
 python main.py --once --dry-run
 ```
 
@@ -239,7 +239,7 @@ history.
 
 ### 8.6 Crash loop
 
-1. Read the traceback at the end of `logs/trading.log`.
+1. Read the traceback at the end of `data/trading.log`.
 2. Reproduce safely: `python main.py --once --dry-run`.
 3. Run `pytest -q` to detect a logic regression.
 4. Roll back to the last known-good commit if needed.
