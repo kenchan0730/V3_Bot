@@ -37,6 +37,48 @@ def test_hammer_is_bullish():
     assert result["stop"] is not None
 
 
+def test_levels_come_from_strongest_pattern():
+    """Multi-pattern bars must take entry/stop from the dominant formation.
+
+    A dragonfly doji (+0.3) fired after a hammer (+0.4) used to overwrite the
+    hammer's levels, so the reported strength and the price levels described
+    different formations.
+    """
+    df = frame(BASE + [_row(10.00, 10.021, 8.0, 10.02)])
+    result = CandlePatterns.identify_all(df)
+    assert "鎚頭" in result["patterns"]
+    assert "（蜻蜓）" in result["patterns"]
+    assert result["driver"] == "鎚頭"
+    assert result["entry"] == pytest.approx(10.021 + 0.01)
+
+
+def test_driver_aligns_with_net_signal():
+    df = frame(BASE + [_row(10.0, 10.05, 8.0, 10.04)])
+    result = CandlePatterns.identify_all(df)
+    assert result["driver"] == "鎚頭"
+    assert result["strength"] > 0
+
+
+def test_driver_is_none_without_patterns():
+    df = frame(BASE + [_row(10.1, 10.4, 9.9, 10.2)])
+    result = CandlePatterns.identify_all(df)
+    assert result["driver"] is None
+
+
+def test_strongest_bearish_pattern_wins():
+    df = frame([
+        _row(10.0, 10.5, 9.5, 10.2),
+        _row(10.2, 10.4, 9.8, 10.0),
+        _row(10.0, 10.7, 9.9, 10.6),
+        _row(10.6, 10.65, 10.55, 10.6),
+        _row(10.8, 10.9, 9.7, 9.8),
+    ])
+    result = CandlePatterns.identify_all(df)
+    if result["signal"] == "bearish":
+        assert result["driver"] in ("看跌吞噬", "黃昏星", "射擊之星")
+        assert result["stop"] is not None
+
+
 def test_shooting_star_is_bearish():
     # Long upper wick, tiny body, no lower wick.
     df = frame(BASE + [_row(10.2, 12.0, 10.2, 10.22)])

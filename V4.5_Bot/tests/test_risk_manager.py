@@ -23,6 +23,38 @@ def risk_mgr():
                        state=TradingState(initial_capital=1000.0))
 
 
+# ----- single source of truth for concentration -----
+
+def test_concentration_cap_is_injected_from_portfolio():
+    """Portfolio owns the single-name cap; sizing must follow it."""
+    from core.portfolio import Portfolio
+
+    mgr = RiskManager(initial_capital=1275.0, config={"max_position_pct": 50.0})
+    portfolio = Portfolio({"max_symbol_pct": 20.0})
+    mgr.set_concentration_cap(portfolio.max_symbol_pct)
+
+    assert mgr.max_position_pct == pytest.approx(20.0)
+    assert mgr.concentration_source == "portfolio.max_symbol_pct"
+
+
+def test_injected_cap_limits_position_size():
+    """20% of $1,275 caps a $30 stock well below the 1.5% risk budget."""
+    mgr = RiskManager(initial_capital=1275.0,
+                      config={"max_risk_percent": 1.5, "max_position_pct": 50.0})
+    wide = mgr.calculate_position_size(30.0, 29.0, price_limit=40, max_shares=100)
+    mgr.set_concentration_cap(20.0)
+    tight = mgr.calculate_position_size(30.0, 29.0, price_limit=40, max_shares=100)
+    assert tight < wide
+    assert tight * 30.0 <= 1275.0 * 0.20
+
+
+def test_set_concentration_cap_ignores_invalid_values():
+    mgr = RiskManager(initial_capital=1275.0, config={"max_position_pct": 20.0})
+    assert mgr.set_concentration_cap(0) == pytest.approx(20.0)
+    assert mgr.set_concentration_cap(None) == pytest.approx(20.0)
+    assert mgr.set_concentration_cap("abc") == pytest.approx(20.0)
+
+
 # ----- config enforcement (H10) -----
 
 def test_config_values_are_applied():

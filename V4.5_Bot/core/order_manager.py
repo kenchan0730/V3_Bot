@@ -7,6 +7,8 @@ logger = logging.getLogger(__name__)
 
 OPEN_STATUSES = {"PendingSubmit", "PreSubmitted", "Submitted", "ApiPending", "PendingCancel"}
 DONE_STATUSES = {"Filled", "Cancelled", "ApiCancelled", "Inactive"}
+# Statuses that mean a protective leg is genuinely working at the broker.
+LIVE_STATUSES = OPEN_STATUSES | {"SUBMITTED"}
 
 
 class ManagedOrder:
@@ -151,6 +153,99 @@ class OrderManager:
 
     def legs_for_symbol(self, symbol):
         return [o for o in self.orders.values() if o.symbol == symbol]
+
+    # ----- protection monitoring -----
+
+    def stop_legs(self, symbol):
+        return [
+            o for o in self.orders.values()
+            if o.symbol == symbol and o.role == "stop_loss"
+        ]
+
+    def has_live_stop(self, symbol):
+        """True when a stop-loss leg is still working at the broker."""
+        return any(o.status in LIVE_STATUSES for o in self.stop_legs(symbol))
+
+    def protection_status(self, symbol):
+        """Classify stop coverage: protected | triggered | unprotected | untracked."""
+        legs = self.stop_legs(symbol)
+        if not legs:
+            return "untracked"
+        if any(leg.status in LIVE_STATUSES for leg in legs):
+            return "protected"
+        if any(leg.status == "Filled" for leg in legs):
+            return "triggered"
+        return "unprotected"
+
+    def check_protection(self, positions, stops=None, auto_rearm=True):
+        """Find open positions with no working stop and optionally re-arm one.
+
+        ``positions`` maps symbol -> {"quantity": n}; ``stops`` maps symbol ->
+        stop price. Returns one report per at-risk symbol.
+        """
+        stops = stops or {}
+        reports = []
+
+        for symbol, pos in (positions or {}).items():
+            try:
+                quantity = float(pos.get("quantity", 0) if isinstance(pos, dict) else pos)
+            except (TypeError, ValueError):
+                continue
+            if quantity <= 0:
+                continue
+
+            status = self.protection_status(symbol)
+            if status in ("protected", "triggered"):
+                continue
+
+            stop_price = stops.get(symbol)
+            report = {
+                "symbol": symbol,
+                "quantity": quantity,
+                "status": status,
+                "stop_price": stop_price,
+                "rearmed": False,
+            }
+
+            logger.error(
+                f"🚨 {symbol} 持倉 {quantity:.0f} 股偵測到停損保護缺失 ({status})"
+            )
+            if self.notifier:
+                self.notifier.alert_order_issue(
+                    symbol,
+                    f"⚠️ 裸倉風險：停損單狀態 {status}，持倉 {quantity:.0f} 股無保護",
+                )
+            if self.blotter:
+                self.blotter.log_event(
+                    "STOP_MISSING", symbol=symbol,
+                    reason=f"停損保護缺失 ({status})",
+                    shares=quantity, stop_price=stop_price or "",
+                )
+
+            if auto_rearm and self.ibkr is not None and stop_price:
+                trade = self.ibkr.place_protective_stop(symbol, int(quantity), stop_price)
+                if trade is not None:
+                    report["rearmed"] = True
+                    order = getattr(trade, "order", None)
+                    order_id = getattr(order, "orderId", f"{symbol}-rearm")
+                    self.track(
+                        order_id, symbol, "SELL", quantity,
+                        stop=stop_price, trade=trade, role="stop_loss",
+                    )
+                    if self.notifier:
+                        self.notifier.alert_order_issue(
+                            symbol, f"🛡️ 已自動補掛保護性停損 @ ${stop_price}"
+                        )
+                    if self.blotter:
+                        self.blotter.log_event(
+                            "STOP_REARMED", symbol=symbol,
+                            reason="自動補掛保護性停損",
+                            shares=quantity, stop_price=stop_price,
+                        )
+
+            reports.append(report)
+
+        return reports
 
     def poll(self):
         """Refresh status/fills for tracked orders. Returns newly filled quantities."""

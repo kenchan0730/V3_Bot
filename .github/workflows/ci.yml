@@ -51,3 +51,36 @@ jobs:
           name: coverage-${{ matrix.python-version }}
           path: V4.5_Bot/coverage.xml
           if-no-files-found: ignore
+
+  docker:
+    name: Docker build + dry-run smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t v45-bot:ci V4.5_Bot
+
+      # Deterministic: catches Dockerfile/dependency breakage that source-only
+      # CI cannot see, without depending on market data being reachable.
+      - name: Verify the bot can be constructed inside the image
+        run: |
+          docker run --rm -e TOTAL_CAPITAL=1275 -e IBKR_ACCOUNT_MODE=paper v45-bot:ci python -c "
+          from core.config_loader import load_config
+          from main import TradingBot
+          config = load_config('config.yaml')
+          bot = TradingBot(config, dry_run=True)
+          assert bot.auto_trade is False
+          assert bot.risk_mgr.max_position_pct == bot.portfolio.max_symbol_pct
+          print('image OK: capital', bot.risk_mgr.total_capital)
+          "
+
+      # Network-dependent, so failures here do not block the build.
+      - name: Dry-run one cycle (best effort)
+        continue-on-error: true
+        run: |
+          timeout 300 docker run --rm \
+            -e TOTAL_CAPITAL=1275 \
+            -e IBKR_ACCOUNT_MODE=paper \
+            v45-bot:ci \
+            python main.py --once --dry-run

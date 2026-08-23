@@ -68,6 +68,7 @@ class TradingBot:
         self.max_daily_move_pct = float(data_cfg.get("max_daily_move_pct", 40.0))
         self.max_data_failures = int(data_cfg.get("max_consecutive_failures", 3))
         self.context_refresh_seconds = int(data_cfg.get("context_refresh_seconds", 3600))
+        self.fetch_timeout = int(data_cfg.get("fetch_timeout_seconds", 30))
 
         self.slippage_ticks = float(exec_cfg.get("slippage_ticks", 1))
         self.tick_size = float(exec_cfg.get("tick_size", 0.01))
@@ -91,6 +92,8 @@ class TradingBot:
         )
         self.emotion = EmotionManager(state=self.state, config=config.get("emotion", {}))
         self.portfolio = Portfolio(config.get("portfolio", {}))
+        # Portfolio owns the single-name cap; keep sizing aligned with it.
+        self.risk_mgr.set_concentration_cap(self.portfolio.max_symbol_pct)
         self.fundamental = FundamentalFilter(config.get("fundamental", {}))
         self.news = NewsSentiment(config.get("news", {}))
         self.strategies = load_strategies(config)
@@ -119,11 +122,14 @@ class TradingBot:
         self.data_failures = {}
         self.returns_cache = {}
         self.zscore_min = float((config.get("zscore", {}) or {}).get("best_zone_min", 0.5))
+        self.factor_weights = (config.get("zscore", {}) or {}).get("weights") or None
         self.exposure = 100
         self.breadth_score = None
         self.last_context_refresh = 0.0
         self.was_connected = False
         self.current_vix = 18.0
+        self.vix_failures = 0
+        self.vix_is_stale = False
         self.max_cycles = None
 
     # ----- signals -----
@@ -265,7 +271,40 @@ class TradingBot:
             logger.exception(f"對帳失敗: {e}")
             self.notifier.alert_exception("reconcile", e)
 
+    def verify_stop_protection(self):
+        """Detect positions whose broker-side stop vanished and re-arm it."""
+        if not self.portfolio.positions:
+            return []
+        try:
+            reports = self.order_mgr.check_protection(
+                self.portfolio.positions,
+                stops=self.portfolio.stops,
+                auto_rearm=self.auto_trade and self.ibkr.is_connected(),
+            )
+        except Exception as e:
+            logger.exception(f"停損保護檢查失敗: {e}")
+            self.notifier.alert_exception("verify_stop_protection", e)
+            return []
+
+        for report in reports:
+            if report["rearmed"]:
+                logger.warning(f"🛡️ {report['symbol']} 已自動補掛停損")
+            else:
+                logger.error(
+                    f"🚨 {report['symbol']} 停損保護缺失且未補掛 "
+                    f"({report['status']})，請人工確認"
+                )
+        return reports
+
     # ----- data (H7) -----
+
+    def _yf_daily(self, symbol):
+        """yfinance daily bars with a timeout so a hung request cannot stall the cycle."""
+        kwargs = dict(period="6mo", interval="1d", progress=False)
+        try:
+            return yf.download(symbol, timeout=self.fetch_timeout, **kwargs)
+        except TypeError:
+            return yf.download(symbol, **kwargs)
 
     def fetch_symbol_data(self, symbol):
         raw = None
@@ -277,7 +316,7 @@ class TradingBot:
                 raw = None
         if raw is None or len(raw) < self.min_bars:
             try:
-                raw = yf.download(symbol, period="6mo", interval="1d", progress=False)
+                raw = self._yf_daily(symbol)
             except Exception as e:
                 logger.warning(f"{symbol} yfinance 數據錯誤: {e}")
                 raw = None
@@ -399,6 +438,20 @@ class TradingBot:
             shares = max(1, int(shares * mind_decision.shares_scale))
         if mind_decision.risk_multiplier < 1.0:
             shares = max(1, int(shares * mind_decision.risk_multiplier))
+
+        conviction = self.professional.conviction_factor(mind_decision.execution_score)
+        if conviction <= 0:
+            reason = f"共振不足 (exec {mind_decision.execution_score}/10)"
+            logger.info(f"   🧠 {reason}")
+            self.blotter.log_rejection(symbol, reason, stage="CONVICTION")
+            return
+        if conviction < 1.0:
+            shares = max(1, int(shares * conviction))
+            logger.info(
+                f"   🎚️ 共振分級 exec {mind_decision.execution_score}/10 "
+                f"→ 倉位 x{conviction:.2f} = {shares} 股"
+            )
+
         if mind_decision.thoughts:
             logger.info(f"   🧠 {' | '.join(mind_decision.thoughts[:3])} (exec {mind_decision.execution_score}/10)")
 
@@ -497,7 +550,7 @@ class TradingBot:
             self.blotter.log_rejection(symbol, f"股價 {price:.2f} 超出上限")
             return
 
-        quant = QuantEngine.dynamic_score(df)
+        quant = QuantEngine.dynamic_score(df, weights=self.factor_weights)
         ma20 = float(df["close"].rolling(20).mean().iloc[-1])
         ma50 = float(df["close"].rolling(50).mean().iloc[-1])
         volume = float(df["volume"].iloc[-1])
@@ -574,17 +627,35 @@ class TradingBot:
     # ----- vix -----
 
     def refresh_vix(self):
+        last_error = None
         for attempt in range(3):
             try:
                 data = yf.Ticker("^VIX").history(period="1d")
                 if not data.empty:
                     self.current_vix = float(data["Close"].iloc[-1])
+                    self.vix_failures = 0
+                    self.vix_is_stale = False
                     self.risk_mgr.check_vix(self.current_vix)
                     return self.current_vix
+                last_error = "空數據"
             except Exception as e:
+                last_error = e
                 logger.warning(f"VIX 獲取失敗 (嘗試 {attempt + 1}/3): {e}")
                 time.sleep(1)
+
+        # Regime, sizing and risk caps all key off VIX; a silent stale value
+        # would quietly invalidate every downstream gate.
+        self.vix_failures += 1
+        self.vix_is_stale = True
         self.current_vix = getattr(self, "current_vix", 18.0)
+        message = (
+            f"VIX 連續 {self.vix_failures} 次獲取失敗，沿用舊值 {self.current_vix:.1f}"
+            f"（風控/regime 判斷可能失準）: {last_error}"
+        )
+        logger.error(f"⚠️ {message}")
+        self.blotter.log_event("VIX_STALE", reason=message)
+        if self.vix_failures >= self.max_data_failures:
+            self.notifier.alert_stale_data("^VIX", message)
         self.risk_mgr.check_vix(self.current_vix)
         return self.current_vix
 
@@ -655,6 +726,7 @@ class TradingBot:
 
                     self.order_mgr.poll()
                     self.order_mgr.cancel_stale()
+                    self.verify_stop_protection()
 
                     may_trade, gate_reason = self.check_gates()
                     regime_label = self.current_regime.regime if self.current_regime else "N/A"

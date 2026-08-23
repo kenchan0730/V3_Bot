@@ -12,17 +12,23 @@ ibkr:
   max_retries: 10
 
 risk:
-  max_risk_percent: 2.0
+  max_risk_percent: 1.5           # J Law 區間 1–1.5%
   max_loss_streak: 3
   reduced_risk_percent: 1.0
+  # 集中度上限的單一事實來源是 portfolio.max_symbol_pct；
+  # main.py 啟動時會注入覆蓋此值（此處僅為獨立使用/回測的預設）。
   max_position_pct: 20.0
-  max_drawdown_limit: 10.0
-  max_absolute_loss: 8.0
+  # 兩條獨立防線：回撤護利潤、絕對虧損護本金（刻意留出間距，避免同時觸發）
+  max_drawdown_limit: 12.0        # 相對高位回撤 → 停機
+  max_absolute_loss: 8.0          # 相對初始資本虧損 → 停機
+  drawdown_warning_pct: 6.0       # 警戒帶：先降風險，不停機
+  drawdown_warning_risk_pct: 0.75
   daily_loss_limit: 2.0
   vix_risk_cap: 1.5
 
 portfolio:
-  max_gross_exposure_pct: 100.0
+  # max_symbol_pct 是單一標的集中度的單一事實來源（會注入 RiskManager）
+  max_gross_exposure_pct: 60.0    # J Law 趨勢市上限；regime 會再往下收緊
   max_open_positions: 5
   max_sector_pct: 40.0
   max_symbol_pct: 20.0
@@ -41,6 +47,13 @@ portfolio:
     INTC: Technology
     AAL: Industrials
 
+backtest:
+  apply_costs: true               # 回測套用手續費+滑點，避免高估實盤績效
+  commission_per_share: 0.005     # IBKR 分層費率近似
+  commission_minimum: 1.0
+  exit_slippage_ticks: 1
+  use_professional_mind: true     # 回測同樣走心態層審批鏈
+
 execution:
   use_bracket_orders: true
   slippage_ticks: 1
@@ -53,6 +66,7 @@ data:
   max_daily_move_pct: 40.0
   max_consecutive_failures: 3
   context_refresh_seconds: 3600
+  fetch_timeout_seconds: 30       # 避免 yfinance 阻塞整個掃描週期
 
 zscore:
   window: 60
@@ -109,6 +123,8 @@ intraday:
   allow_opening_range_breakout: true
   skip_first_minutes: 5
   skip_last_minutes: 10
+  max_bar_move_pct: 10.0          # 單根分鐘棒異常波動門檻（與日線品質閘門一致）
+  fetch_timeout_seconds: 20       # 避免 yfinance 無限阻塞主循環
 
 watchlist:
   core:

@@ -26,14 +26,42 @@ class RiskManager:
         self.reduced_risk_pct = float(cfg.get("reduced_risk_percent", 1.0))
         self.max_loss_streak = int(cfg.get("max_loss_streak", 3))
         self.max_position_pct = float(cfg.get("max_position_pct", 50.0))
+        self.concentration_source = "risk.max_position_pct"
         self.max_drawdown_limit = float(cfg.get("max_drawdown_limit", 10.0))
         self.max_absolute_loss = float(cfg.get("max_absolute_loss", 8.0))
+        self.drawdown_warning_pct = float(
+            cfg.get("drawdown_warning_pct", self.max_drawdown_limit * 0.6)
+        )
+        self.drawdown_warning_risk_pct = float(
+            cfg.get("drawdown_warning_risk_pct", self.reduced_risk_pct)
+        )
         self.daily_loss_limit = float(cfg.get("daily_loss_limit", daily_loss_limit))
         self.vix_threshold = float(cfg.get("vix_threshold", vix_threshold))
         self.vix_risk_cap = float(cfg.get("vix_risk_cap", 1.5))
 
         self.state = state if state is not None else TradingState(initial_capital=initial_capital)
         self.current_risk_pct = self.max_risk_pct
+
+    def set_concentration_cap(self, pct, source="portfolio.max_symbol_pct"):
+        """Adopt the book-level single-name cap as the sizing concentration cap.
+
+        Portfolio owns this limit; injecting it here keeps ``RiskManager`` sizing
+        and ``Portfolio.can_open`` from drifting apart across config edits.
+        """
+        try:
+            pct = float(pct)
+        except (TypeError, ValueError):
+            return self.max_position_pct
+        if pct <= 0:
+            return self.max_position_pct
+
+        if abs(pct - self.max_position_pct) > 1e-9:
+            logger.warning(
+                f"集中度上限對齊 {source}: {self.max_position_pct}% → {pct}%"
+            )
+        self.max_position_pct = pct
+        self.concentration_source = source
+        return self.max_position_pct
 
     # ----- state delegation (single source of truth) -----
 
@@ -86,16 +114,59 @@ class RiskManager:
         """Realised P&L for the current trading day (from fills)."""
         return self.state.daily_realized_pnl
 
+    def drawdown_pct(self):
+        """Give-back from the equity high-water mark."""
+        if self.peak_capital <= 0:
+            return 0.0
+        return (self.peak_capital - self.total_capital) / self.peak_capital * 100
+
+    def absolute_loss_pct(self):
+        """Loss measured against starting capital (capital-preservation floor)."""
+        if self.initial_capital <= 0:
+            return 0.0
+        return (self.initial_capital - self.total_capital) / self.initial_capital * 100
+
+    def drawdown_state(self):
+        """Three-tier verdict: OK, WARNING (de-risk) or HALT.
+
+        The two halt lines are deliberately distinct: peak drawdown protects
+        accumulated profit, while absolute loss is the floor under the starting
+        capital. A warning band de-risks before either line is breached.
+        """
+        drawdown = self.drawdown_pct()
+        absolute = self.absolute_loss_pct()
+
+        if drawdown > self.max_drawdown_limit:
+            return {
+                "level": "HALT", "drawdown_pct": drawdown, "absolute_loss_pct": absolute,
+                "message": f"高位回撤 {drawdown:.1f}% > {self.max_drawdown_limit}%",
+            }
+        if absolute > self.max_absolute_loss:
+            return {
+                "level": "HALT", "drawdown_pct": drawdown, "absolute_loss_pct": absolute,
+                "message": f"絕對虧損 {absolute:.1f}% > {self.max_absolute_loss}%",
+            }
+        if drawdown > self.drawdown_warning_pct:
+            return {
+                "level": "WARNING", "drawdown_pct": drawdown, "absolute_loss_pct": absolute,
+                "message": (
+                    f"回撤 {drawdown:.1f}% 超過警戒 {self.drawdown_warning_pct}%，"
+                    f"風險降至 {self.drawdown_warning_risk_pct}%"
+                ),
+            }
+        return {
+            "level": "OK", "drawdown_pct": drawdown, "absolute_loss_pct": absolute,
+            "message": "OK",
+        }
+
     def check_drawdown(self):
-        if self.peak_capital > 0:
-            drawdown = (self.peak_capital - self.total_capital) / self.peak_capital * 100
-            if drawdown > self.max_drawdown_limit:
-                return False, f"高位回撤 {drawdown:.1f}% > {self.max_drawdown_limit}%"
-        if self.initial_capital > 0:
-            loss_from_initial = (self.initial_capital - self.total_capital) / self.initial_capital * 100
-            if loss_from_initial > self.max_absolute_loss:
-                return False, f"絕對虧損 {loss_from_initial:.1f}% > {self.max_absolute_loss}%"
-        return True, "OK"
+        state = self.drawdown_state()
+        if state["level"] == "HALT":
+            return False, state["message"]
+        if state["level"] == "WARNING":
+            self.current_risk_pct = min(self.current_risk_pct, self.drawdown_warning_risk_pct)
+            logger.warning(f"⚠️ {state['message']}")
+        return True, state["message"]
 
     def check_daily_loss(self, pnl):
         """Apply a realised P&L delta and re-evaluate the daily limit."""

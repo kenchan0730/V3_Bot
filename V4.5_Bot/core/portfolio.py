@@ -68,6 +68,16 @@ class Portfolio:
         if symbol in self.positions:
             self.positions[symbol]["stop"] = stop_price
 
+    @property
+    def stops(self):
+        """Known stop price per held symbol, for protection re-arming."""
+        result = {}
+        for symbol, pos in self.positions.items():
+            stop = pos.get("stop")
+            if stop:
+                result[symbol] = float(stop)
+        return result
+
     def update_price(self, symbol, price):
         if symbol in self.positions and price:
             self.positions[symbol]["price"] = float(price)

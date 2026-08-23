@@ -1,7 +1,28 @@
-# core/quant_engine.py - 最終穩定版
+"""Four-factor quantitative score (momentum, volume, volatility, relative strength).
+
+Weight calibration status: the default 35/25/20/20 split is an *unvalidated
+engineering prior*, not a statistically fitted result. Run
+``scripts/factor_sensitivity.py`` to grid-search weights against realised
+profit factor before treating any split as evidence-based.
+
+The volatility factor needs >= 120 bars (60 warm-up + 60 z-score window). With
+a shorter history it returns 0.0 and its weight is silently redistributed, so
+``dynamic_score`` reports ``factors_active`` to make that observable.
+"""
+
 import pandas as pd
 import numpy as np
 from core.data_utils import normalize_columns
+
+DEFAULT_WEIGHTS = {
+    "momentum": 0.35,
+    "volume": 0.25,
+    "volatility": 0.20,
+    "relative_strength": 0.20,
+}
+
+MIN_BARS_FOR_SCORE = 60
+MIN_BARS_FOR_VOLATILITY = 120
 
 
 class QuantEngine:
@@ -50,9 +71,41 @@ class QuantEngine:
         return rsi_value
 
     @staticmethod
-    def dynamic_score(df):
+    def resolve_weights(weights=None):
+        """Merge caller/config weights over the defaults and renormalise to 1.0."""
+        merged = {**DEFAULT_WEIGHTS, **(weights or {})}
+        clean = {}
+        for key in DEFAULT_WEIGHTS:
+            try:
+                clean[key] = max(0.0, float(merged.get(key, DEFAULT_WEIGHTS[key])))
+            except (TypeError, ValueError):
+                clean[key] = DEFAULT_WEIGHTS[key]
+        total = sum(clean.values())
+        if total <= 0:
+            return dict(DEFAULT_WEIGHTS)
+        return {key: value / total for key, value in clean.items()}
+
+    @staticmethod
+    def compression_series(high, low, short_window=14, long_window=50):
+        """Vectorised volatility-compression score (was an O(N) Python loop).
+
+        Replaces the per-bar loop that made repeated ``dynamic_score`` calls in
+        backtests O(N^2); results match the previous implementation.
+        """
+        atr_short = high.rolling(short_window).max() - low.rolling(short_window).min()
+        atr_long = high.rolling(long_window).max() - low.rolling(long_window).min()
+        ratio = (atr_short / atr_long.replace(0, np.nan)).fillna(1.0)
+        raw = np.where(
+            ratio <= 0.85, 1.5,
+            np.where(ratio >= 1.3, -1.5, (1.3 - ratio) / (1.3 - 0.85) * 1.5 - 1.5),
+        )
+        return pd.Series(raw, index=high.index), ratio
+
+    @staticmethod
+    def dynamic_score(df, weights=None):
         df = normalize_columns(df)
-        if len(df) < 60:
+        resolved = QuantEngine.resolve_weights(weights)
+        if len(df) < MIN_BARS_FOR_SCORE:
             return {
                 "z_score": 0.0,
                 "z_momentum": 0.0,
@@ -60,7 +113,10 @@ class QuantEngine:
                 "z_volatility": 0.0,
                 "z_rs": 0.0,
                 "compression_ratio": 1.0,
-                "rsi": 50.0
+                "rsi": 50.0,
+                "weights": resolved,
+                "factors_active": [],
+                "volatility_factor_active": False,
             }
 
         close_col, high_col, low_col, volume_col = QuantEngine._get_columns(df)
@@ -96,33 +152,13 @@ class QuantEngine:
         else:
             vol_score = -z_volume_raw
 
-        # ----- 3. 波動率壓縮/擴張（權重 20%） -----
-        compression_scores = []
-        for i in range(60, len(df)):
-            # 使用 .max() 和 .min() 後強制轉為 float
-            high_slice = high.iloc[i-13:i+1]
-            low_slice = low.iloc[i-13:i+1]
-            atr_14 = float(high_slice.max()) - float(low_slice.min())
-            
-            high_slice_50 = high.iloc[i-49:i+1]
-            low_slice_50 = low.iloc[i-49:i+1]
-            atr_50 = float(high_slice_50.max()) - float(low_slice_50.min())
-            
-            if atr_50 > 0:
-                ratio = atr_14 / atr_50
-            else:
-                ratio = 1.0
-            
-            if ratio <= 0.85:
-                raw = 1.5
-            elif ratio >= 1.3:
-                raw = -1.5
-            else:
-                raw = (1.3 - ratio) / (1.3 - 0.85) * 1.5 - 1.5
-            compression_scores.append(raw)
-
-        vol_series = pd.Series(compression_scores)
-        if len(vol_series) >= 60:
+        # ----- 3. 波動率壓縮/擴張（需 >=120 根 K 線才會生效） -----
+        raw_series, ratio_series = QuantEngine.compression_series(high, low)
+        vol_series = raw_series.iloc[MIN_BARS_FOR_SCORE:].reset_index(drop=True)
+        # The factor is only computable once there is a full z-score window on
+        # top of the warm-up; below that its weight is silently redistributed.
+        volatility_computable = len(vol_series) >= 60
+        if volatility_computable:
             z_volatility_series = QuantEngine.calculate_zscore(vol_series, 60)
             z_volatility = QuantEngine._to_float(z_volatility_series.iloc[-1])
         else:
@@ -131,10 +167,9 @@ class QuantEngine:
         if pd.isna(z_volatility) or not np.isfinite(z_volatility):
             z_volatility = 0.0
 
-        # 當前壓縮比
-        atr_14_curr = float(high.iloc[-13:].max()) - float(low.iloc[-13:].min())
-        atr_50_curr = float(high.iloc[-49:].max()) - float(low.iloc[-49:].min())
-        compression_ratio = atr_14_curr / atr_50_curr if atr_50_curr > 0 else 1.0
+        compression_ratio = QuantEngine._to_float(ratio_series.iloc[-1])
+        if pd.isna(compression_ratio) or not np.isfinite(compression_ratio):
+            compression_ratio = 1.0
 
         # ----- 4. 相對強弱（權重 20%） -----
         ma20 = close.rolling(20).mean()
@@ -146,8 +181,13 @@ class QuantEngine:
             z_rs = 0.0
         z_rs = max(-3.0, min(3.0, z_rs))
 
-        # ----- 加權總分 -----
-        final_score = z_momentum * 0.35 + vol_score * 0.25 + z_volatility * 0.20 + z_rs * 0.20
+        # ----- 加權總分（權重來自 config.zscore.weights） -----
+        final_score = (
+            z_momentum * resolved["momentum"]
+            + vol_score * resolved["volume"]
+            + z_volatility * resolved["volatility"]
+            + z_rs * resolved["relative_strength"]
+        )
         final_score = max(-3.0, min(3.0, final_score))
 
         # ----- 5日升幅懲罰 -----
@@ -159,6 +199,16 @@ class QuantEngine:
 
         rsi = QuantEngine.calculate_rsi(df)
 
+        active = []
+        if z_momentum != 0.0:
+            active.append("momentum")
+        if vol_score != 0.0:
+            active.append("volume")
+        if z_volatility != 0.0:
+            active.append("volatility")
+        if z_rs != 0.0:
+            active.append("relative_strength")
+
         return {
             "z_score": round(float(final_score), 2),
             "z_momentum": round(float(z_momentum), 2),
@@ -166,7 +216,10 @@ class QuantEngine:
             "z_volatility": round(float(z_volatility), 2),
             "z_rs": round(float(z_rs), 2),
             "compression_ratio": round(float(compression_ratio), 2),
-            "rsi": round(float(rsi), 1)
+            "rsi": round(float(rsi), 1),
+            "weights": resolved,
+            "factors_active": active,
+            "volatility_factor_active": volatility_computable,
         }
 
     @staticmethod

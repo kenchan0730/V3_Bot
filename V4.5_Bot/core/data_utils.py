@@ -107,6 +107,49 @@ def detect_price_outlier(df, max_daily_move_pct=40.0):
     return abs(move) > max_daily_move_pct, move
 
 
+def intraday_quality_report(df, min_bars=12, max_bar_move_pct=10.0):
+    """Quality gate for minute bars, mirroring the daily checks.
+
+    Freshness is not re-checked here (the intraday fetcher already filters to
+    today's session), but structure and per-bar outliers are, so minute data is
+    held to the same standard as daily data.
+    """
+    if df is None or len(df) == 0:
+        return {"ok": False, "stage": "structure", "message": "盤中數據為空"}
+    if len(df) < min_bars:
+        return {
+            "ok": False, "stage": "structure",
+            "message": f"盤中數據不足 ({len(df)} < {min_bars})",
+        }
+
+    missing = [col for col in REQUIRED_COLUMNS if col not in df.columns]
+    if missing:
+        return {
+            "ok": False, "stage": "structure",
+            "message": f"盤中缺少欄位: {', '.join(missing)}",
+        }
+    if df[list(REQUIRED_COLUMNS)].isna().any().any():
+        return {"ok": False, "stage": "structure", "message": "盤中數據含缺失值"}
+
+    last = df.iloc[-1]
+    if float(last["close"]) <= 0:
+        return {
+            "ok": False, "stage": "structure",
+            "message": f"盤中收盤價異常: {last['close']}",
+        }
+    if not (float(last["low"]) <= float(last["close"]) <= float(last["high"])):
+        return {"ok": False, "stage": "structure", "message": "盤中高低收不一致"}
+
+    is_outlier, move = detect_price_outlier(df, max_bar_move_pct)
+    if is_outlier:
+        return {
+            "ok": False, "stage": "outlier",
+            "message": f"單根分鐘棒波動 {move:.1f}% 超出 {max_bar_move_pct}%，疑似錯誤數據",
+        }
+
+    return {"ok": True, "stage": "passed", "message": f"盤中數據 {len(df)} 根，品質正常"}
+
+
 def quality_report(df, min_bars=60, max_age_trading_days=2, max_daily_move_pct=40.0, reference=None):
     """Run every check and return a single verdict used by the trading loop."""
     ok_structure, structure_msg = validate_ohlcv(df, min_bars)

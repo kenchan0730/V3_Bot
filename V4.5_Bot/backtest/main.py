@@ -10,6 +10,7 @@ import yfinance as yf
 from backtest.engine import BacktestEngine
 from core.config_loader import load_config
 from core.correlation import clustered_pairs, correlation_matrix
+from core.professional_mind import ProfessionalMind
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s | %(message)s")
 
@@ -22,7 +23,17 @@ def parse_args(argv=None):
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--max-hold-bars", type=int, default=20)
     parser.add_argument("--json", action="store_true", help="以 JSON 輸出")
+    parser.add_argument("--no-costs", action="store_true", help="關閉手續費/滑點（僅供對照）")
+    parser.add_argument("--no-mind", action="store_true", help="跳過心態層審批（僅供對照）")
     return parser.parse_args(argv)
+
+
+def build_mind(config):
+    """Backtest uses the live deliberation layer, minus journal side effects."""
+    mind_cfg = dict(config.get("professional_mind", {}) or {})
+    mind_cfg["log_every_deliberation"] = False
+    mind_cfg["journal_file"] = "data/backtest_journal.csv"
+    return ProfessionalMind(mind_cfg)
 
 
 def main(argv=None):
@@ -33,7 +44,21 @@ def main(argv=None):
         print("未指定標的")
         return 1
 
-    engine = BacktestEngine(config, initial_capital=args.capital, max_hold_bars=args.max_hold_bars)
+    if args.no_costs:
+        config.setdefault("backtest", {})["apply_costs"] = False
+
+    use_mind = config.get("backtest", {}).get("use_professional_mind", True)
+    mind = None if args.no_mind or not use_mind else build_mind(config)
+
+    engine = BacktestEngine(
+        config, initial_capital=args.capital, max_hold_bars=args.max_hold_bars,
+        professional_mind=mind,
+    )
+    if not args.json:
+        print(
+            f"成本模型: {'啟用' if engine.apply_costs else '關閉'} | "
+            f"心態層審批: {'啟用' if mind else '關閉'}"
+        )
     summaries, closes = {}, {}
 
     for symbol in symbols:

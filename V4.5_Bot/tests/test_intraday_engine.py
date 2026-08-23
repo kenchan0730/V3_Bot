@@ -18,6 +18,7 @@ def engine():
         "min_intraday_bars": 6,
         "skip_first_minutes": 0,
         "skip_last_minutes": 0,
+        "max_bar_move_pct": 10.0,
     })
 
 
@@ -62,6 +63,45 @@ def test_evaluate_entry_rejects_far_from_vwap(engine, monkeypatch):
     monkeypatch.setattr(engine, "in_trade_window", lambda now=None: (True, "OK"))
     result = engine.evaluate_entry("TEST", "STRONG_BUY", 15.0, df=df)
     assert result["ok"] is False
+
+
+def test_quality_gate_accepts_clean_bars(engine):
+    report = engine.quality_gate(_sample_intraday())
+    assert report["ok"] is True
+    assert report["stage"] == "passed"
+
+
+def test_quality_gate_rejects_thin_data(engine):
+    report = engine.quality_gate(_sample_intraday().head(3))
+    assert report["ok"] is False
+    assert report["stage"] == "structure"
+
+
+def test_quality_gate_rejects_bar_outlier(engine):
+    df = _sample_intraday().copy()
+    df.iloc[-1, df.columns.get_loc("close")] = 100.0
+    df.iloc[-1, df.columns.get_loc("high")] = 101.0
+    report = engine.quality_gate(df)
+    assert report["ok"] is False
+    assert report["stage"] == "outlier"
+
+
+def test_quality_gate_rejects_inconsistent_bar(engine):
+    df = _sample_intraday().copy()
+    df.iloc[-1, df.columns.get_loc("close")] = 0.0
+    report = engine.quality_gate(df)
+    assert report["ok"] is False
+
+
+def test_evaluate_entry_blocks_bad_intraday_data(engine, monkeypatch):
+    """Minute bars are held to the same standard as daily bars."""
+    df = _sample_intraday().copy()
+    df.iloc[-1, df.columns.get_loc("close")] = 100.0
+    df.iloc[-1, df.columns.get_loc("high")] = 101.0
+    monkeypatch.setattr(engine, "in_trade_window", lambda now=None: (True, "OK"))
+    result = engine.evaluate_entry("TEST", "STRONG_BUY", 10.6, df=df)
+    assert result["ok"] is False
+    assert "intraday data" in result["reason"]
 
 
 def test_vwap_pullback_uses_percent_not_double_scaled(engine, monkeypatch):

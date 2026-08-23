@@ -103,6 +103,33 @@ class DynamicPositionSizer:
             return max(atr_stop, signal_stop) if atr_stop < entry else signal_stop
         return atr_stop
 
+    def enforce_risk_budget(self, shares, entry, stop, total_capital, max_risk_pct):
+        """Cap shares so realised dollar risk still fits the per-trade budget.
+
+        Widening a stop (e.g. swapping the candle stop for a looser ATR stop)
+        raises risk per share, which can cancel out - or exceed - the share
+        reduction applied for volatility. Without this check "smaller position,
+        wider stop" can silently increase dollar risk.
+        """
+        shares = int(shares)
+        if shares <= 0 or entry <= 0 or total_capital <= 0 or max_risk_pct <= 0:
+            return shares, "OK"
+
+        risk_per_share = entry - stop
+        if risk_per_share <= 0:
+            return shares, "OK"
+
+        budget = total_capital * (max_risk_pct / 100.0)
+        actual = risk_per_share * shares
+        if actual <= budget:
+            return shares, "OK"
+
+        capped = max(0, int(budget / risk_per_share))
+        return capped, (
+            f"風險守恆: ${actual:.2f} 超出預算 ${budget:.2f}"
+            f"（停損 ${risk_per_share:.2f}/股），縮至 {capped} 股"
+        )
+
     def scale_shares(self, base_shares, df, entry, stop, total_capital, vix=18.0):
         shares = int(base_shares)
         if shares <= 0:

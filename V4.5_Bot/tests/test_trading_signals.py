@@ -87,8 +87,45 @@ def test_strong_buy_full_setup():
     price, ma20, ma50 = levels(df)
     signal = TradingSignals.get_combined_signal(df, price, 18.0, 1.0, 1.6, ma20, ma50, zscore_min=0.5)
     assert signal["action"] == "STRONG_BUY"
-    assert signal["confidence"] == "HIGH"
     assert signal["stop"] < signal["entry"] < signal["target1"] < signal["target2"]
+
+
+def test_confidence_is_numeric_for_risk_layer():
+    """Regression: a string here raised ValueError in ProfessionalMind."""
+    df = with_hammer(_make_df([10 + i * 0.1 for i in range(70)]))
+    price, ma20, ma50 = levels(df)
+    signal = TradingSignals.get_combined_signal(df, price, 18.0, 1.0, 1.6, ma20, ma50)
+    assert isinstance(signal["confidence"], float)
+    assert 0.0 < signal["confidence"] <= 1.0
+    assert float(signal["confidence"]) == signal["confidence"]
+    assert signal["confidence_label"] in ("HIGH", "MEDIUM", "LOW")
+
+
+def test_confluence_score_rewards_aligned_edges():
+    df = with_hammer(_make_df([10 + i * 0.1 for i in range(70)]))
+    price, ma20, ma50 = levels(df)
+    calm_strong = TradingSignals.get_combined_signal(df, price, 15.0, 1.0, 2.5, ma20, ma50)
+    marginal = TradingSignals.get_combined_signal(df, price, 24.0, 0.55, 1.6, ma20, ma50)
+    assert calm_strong["action"] == marginal["action"] == "STRONG_BUY"
+    assert calm_strong["confluence_score"] > marginal["confluence_score"]
+    assert calm_strong["confidence"] > marginal["confidence"]
+
+
+def test_confluence_score_capped_and_graded():
+    df = with_hammer(_make_df([10 + i * 0.1 for i in range(70)]))
+    price, ma20, ma50 = levels(df)
+    signal = TradingSignals.get_combined_signal(df, price, 15.0, 1.0, 2.5, ma20, ma50)
+    assert 5 <= signal["confluence_score"] <= 10
+    assert set(signal["strong_edges"]).issubset(set(signal["edges"]))
+
+
+def test_hold_reports_missing_edges():
+    df = with_hammer(_make_df([10 + i * 0.1 for i in range(70)]))
+    price, ma20, ma50 = levels(df)
+    signal = TradingSignals.get_combined_signal(df, price, 40.0, 1.0, 1.6, ma20, ma50)
+    assert signal["action"] == "HOLD"
+    assert "volatility" in signal["missing_edges"]
+    assert signal["confluence_score"] < 5
 
 
 def test_strong_buy_risk_reward_ratios():

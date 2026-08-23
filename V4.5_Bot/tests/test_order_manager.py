@@ -175,6 +175,106 @@ def test_cancel_stale_calls_broker():
     assert len(fake_ib.cancelled_orders) == 1
 
 
+class RecordingIBKR:
+    def __init__(self, succeed=True):
+        self.succeed = succeed
+        self.calls = []
+
+    def place_protective_stop(self, symbol, quantity, stop_price, action="SELL"):
+        self.calls.append((symbol, quantity, stop_price, action))
+        if not self.succeed:
+            return None
+        return FakeTrade(FakeContract(symbol), FakeOrder(action, quantity, stop_price))
+
+    def cancel_order(self, order):
+        return True
+
+
+def test_protection_status_reports_protected(manager):
+    manager.track(9, "AVAH", "SELL", 10, role="stop_loss", trade=make_trade())
+    assert manager.protection_status("AVAH") == "protected"
+    assert manager.has_live_stop("AVAH") is True
+
+
+def test_protection_status_detects_cancelled_stop(manager):
+    managed = manager.track(9, "AVAH", "SELL", 10, role="stop_loss", trade=make_trade())
+    managed.status = "Cancelled"
+    assert manager.protection_status("AVAH") == "unprotected"
+    assert manager.has_live_stop("AVAH") is False
+
+
+def test_protection_status_untracked_symbol(manager):
+    assert manager.protection_status("QXO") == "untracked"
+
+
+def test_protection_status_triggered_stop(manager):
+    managed = manager.track(9, "AVAH", "SELL", 10, role="stop_loss", trade=make_trade())
+    managed.status = "Filled"
+    assert manager.protection_status("AVAH") == "triggered"
+
+
+def test_check_protection_rearms_naked_position():
+    ibkr = RecordingIBKR()
+    manager = OrderManager(ibkr=ibkr, timeout_seconds=300,
+                           blotter=RecordingBlotter(), notifier=RecordingNotifier())
+    managed = manager.track(9, "AVAH", "SELL", 10, role="stop_loss", trade=make_trade())
+    managed.status = "Cancelled"
+
+    reports = manager.check_protection(
+        {"AVAH": {"quantity": 10}}, stops={"AVAH": 11.0},
+    )
+    assert len(reports) == 1
+    assert reports[0]["rearmed"] is True
+    assert ibkr.calls == [("AVAH", 10, 11.0, "SELL")]
+    assert any("裸倉" in msg for _, msg in manager.notifier.alerts)
+    assert any(event == "STOP_REARMED" for event, _ in manager.blotter.events)
+
+
+def test_check_protection_skips_protected_position():
+    ibkr = RecordingIBKR()
+    manager = OrderManager(ibkr=ibkr, notifier=RecordingNotifier())
+    manager.track(9, "AVAH", "SELL", 10, role="stop_loss", trade=make_trade())
+    assert manager.check_protection({"AVAH": {"quantity": 10}}, stops={"AVAH": 11.0}) == []
+    assert ibkr.calls == []
+
+
+def test_check_protection_alerts_when_rearm_disabled():
+    ibkr = RecordingIBKR()
+    manager = OrderManager(ibkr=ibkr, notifier=RecordingNotifier(),
+                           blotter=RecordingBlotter())
+    managed = manager.track(9, "AVAH", "SELL", 10, role="stop_loss", trade=make_trade())
+    managed.status = "Inactive"
+
+    reports = manager.check_protection(
+        {"AVAH": {"quantity": 10}}, stops={"AVAH": 11.0}, auto_rearm=False,
+    )
+    assert reports[0]["rearmed"] is False
+    assert ibkr.calls == []
+    assert any(event == "STOP_MISSING" for event, _ in manager.blotter.events)
+
+
+def test_check_protection_handles_failed_rearm():
+    ibkr = RecordingIBKR(succeed=False)
+    manager = OrderManager(ibkr=ibkr, notifier=RecordingNotifier())
+    managed = manager.track(9, "AVAH", "SELL", 10, role="stop_loss", trade=make_trade())
+    managed.status = "Cancelled"
+    reports = manager.check_protection({"AVAH": {"quantity": 10}}, stops={"AVAH": 11.0})
+    assert reports[0]["rearmed"] is False
+
+
+def test_check_protection_ignores_flat_symbols():
+    manager = OrderManager(ibkr=RecordingIBKR(), notifier=RecordingNotifier())
+    assert manager.check_protection({"AVAH": {"quantity": 0}}) == []
+
+
+def test_check_protection_untracked_position_alerts():
+    ibkr = RecordingIBKR()
+    manager = OrderManager(ibkr=ibkr, notifier=RecordingNotifier())
+    reports = manager.check_protection({"QXO": {"quantity": 5}}, stops={"QXO": 9.5})
+    assert reports[0]["status"] == "untracked"
+    assert reports[0]["rearmed"] is True
+
+
 def test_managed_order_serialization():
     order = ManagedOrder(1, "AVAH", "BUY", 10, 12.0, 11.0, 14.0)
     data = order.to_dict()

@@ -51,6 +51,17 @@ class ProfessionalMind:
         "log_every_deliberation": True,
         "journal_file": "data/execution_journal.csv",
         "consecutive_no_trade_days_goal": 3,
+        # M.E.T.A. conviction sizing: more converging edges -> larger position.
+        "conviction_sizing": {
+            "enabled": True,
+            "full_size_score": 9,
+            "reduced_score": 7,
+            "minimum_score": 6,
+            "reduced_factor": 0.75,
+            "minimum_factor": 0.5,
+            "weak_factor": 0.35,
+            "reject_below": 4,
+        },
     }
 
     def __init__(self, config=None, state=None):
@@ -204,13 +215,28 @@ class ProfessionalMind:
             decision.stop_override = self.liquidity.adjust_stop(atr_stop, entry_price)
             thoughts.append(f"ATR 停損 ${decision.stop_override:.2f}")
 
+        effective_stop = decision.stop_override or stop_price
         scaled, size_msg = self.sizer.scale_shares(
-            base_shares, df, entry_price, decision.stop_override or stop_price,
+            base_shares, df, entry_price, effective_stop,
             risk_mgr.total_capital, vix=getattr(context, "vix", 18),
         )
-        decision.shares_scale = scaled / base_shares if base_shares else 0
         if size_msg != "OK":
             thoughts.append(size_msg)
+
+        scaled, budget_msg = self.sizer.enforce_risk_budget(
+            scaled, entry_price, effective_stop, risk_mgr.total_capital,
+            getattr(risk_mgr, "current_risk_pct", 2.0),
+        )
+        if budget_msg != "OK":
+            thoughts.append(budget_msg)
+        if scaled <= 0:
+            return MindDecision(
+                approve=False, action="REJECT",
+                reasons=[budget_msg if budget_msg != "OK" else "倉位縮至零"],
+                thoughts=thoughts,
+            )
+
+        decision.shares_scale = scaled / base_shares if base_shares else 0
 
         ok_pdt, pdt_msg = self.pdt.check(risk_mgr.total_capital, is_day_trade=is_day_trade)
         if not ok_pdt:
@@ -263,7 +289,13 @@ class ProfessionalMind:
         return decision
 
     def _score_execution(self, signal, context, thoughts):
-        score = 7
+        """1–10 conviction grade; seeded by signal confluence when available."""
+        try:
+            confluence = int(signal.get("confluence_score") or 0)
+        except (TypeError, ValueError):
+            confluence = 0
+        score = confluence if confluence > 0 else 7
+
         conf = parse_confidence(signal.get("confidence"), default=0.5)
         if conf >= 0.8:
             score += 1
@@ -276,6 +308,32 @@ class ProfessionalMind:
         if getattr(context, "regime", "") in (RISK_OFF, CRISIS):
             score -= 3
         return max(1, min(10, score))
+
+    def conviction_factor(self, execution_score):
+        """Translate a 1–10 conviction grade into a position-size multiplier.
+
+        Only fully converging setups (M.E.T.A. confluence) earn full size; a
+        barely-qualifying signal is taken small rather than at the same weight.
+        Returns 0.0 when the grade is too weak to trade at all.
+        """
+        cfg = {**self.DEFAULTS["conviction_sizing"], **(self.cfg.get("conviction_sizing") or {})}
+        if not cfg.get("enabled", True):
+            return 1.0
+
+        try:
+            score = int(execution_score)
+        except (TypeError, ValueError):
+            return 1.0
+
+        if score < int(cfg["reject_below"]):
+            return 0.0
+        if score >= int(cfg["full_size_score"]):
+            return 1.0
+        if score >= int(cfg["reduced_score"]):
+            return float(cfg["reduced_factor"])
+        if score >= int(cfg["minimum_score"]):
+            return float(cfg["minimum_factor"])
+        return float(cfg["weak_factor"])
 
     def theme_symbols(self):
         return self.themes.active_symbols()

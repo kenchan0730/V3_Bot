@@ -313,6 +313,30 @@ class IBKRConnector:
         stop_loss.ocaType = 1
         return [parent, take_profit, stop_loss]
 
+    def place_protective_stop(self, symbol, quantity, stop_price, action="SELL"):
+        """Re-arm a standalone stop for a position whose bracket leg disappeared.
+
+        Used to recover from a broker-side rejection of the bracket stop child,
+        which would otherwise leave the position naked.
+        """
+        if self.ib is None or not self.connected:
+            logger.error(f"未連線，無法補掛 {symbol} 保護性停損")
+            return None
+        if quantity <= 0 or not stop_price or stop_price <= 0:
+            logger.error(f"拒絕無效的保護性停損: {symbol} {quantity}@{stop_price}")
+            return None
+
+        trade = self.place_order_with_retry(
+            symbol, action, quantity, order_type="STP", stop_price=stop_price,
+        )
+        if trade is not None:
+            logger.warning(
+                f"🛡️ 已補掛保護性停損: {symbol} {quantity} 股 @ {stop_price}"
+            )
+        else:
+            logger.error(f"❌ {symbol} 保護性停損補掛失敗，持倉可能無保護")
+        return trade
+
     def place_order_with_retry(self, symbol, action, quantity, order_type="LMT",
                               limit_price=None, stop_price=None):
         """Single-leg order. Prefer place_bracket_order for entries."""

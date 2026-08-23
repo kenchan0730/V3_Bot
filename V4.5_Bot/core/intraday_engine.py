@@ -16,7 +16,7 @@ import pandas as pd
 import pytz
 import yfinance as yf
 
-from core.data_utils import normalize_columns
+from core.data_utils import intraday_quality_report, normalize_columns
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,8 @@ class IntradayEngine:
         "session_end": "16:00",
         "skip_first_minutes": 5,
         "skip_last_minutes": 10,
+        "max_bar_move_pct": 10.0,
+        "fetch_timeout_seconds": 20,
     }
 
     def __init__(self, config=None, ibkr=None):
@@ -84,13 +86,33 @@ class IntradayEngine:
             raw = yf.download(
                 symbol, period="1d", interval=self.cfg["fallback_interval"],
                 progress=False, prepost=False,
+                timeout=int(self.cfg.get("fetch_timeout_seconds", 20)),
             )
             if raw is None or raw.empty:
                 return None
             return normalize_columns(raw)
+        except TypeError:
+            # Older yfinance builds do not accept a timeout kwarg.
+            try:
+                raw = yf.download(
+                    symbol, period="1d", interval=self.cfg["fallback_interval"],
+                    progress=False, prepost=False,
+                )
+                return normalize_columns(raw) if raw is not None and not raw.empty else None
+            except Exception as exc:
+                logger.warning(f"{symbol} yfinance intraday failed: {exc}")
+                return None
         except Exception as exc:
             logger.warning(f"{symbol} yfinance intraday failed: {exc}")
             return None
+
+    def quality_gate(self, df):
+        """Apply the daily-equivalent quality checks to intraday bars."""
+        return intraday_quality_report(
+            df,
+            min_bars=int(self.cfg.get("min_intraday_bars", 12)),
+            max_bar_move_pct=float(self.cfg.get("max_bar_move_pct", 10.0)),
+        )
 
     @staticmethod
     def compute_vwap(df):
@@ -159,6 +181,12 @@ class IntradayEngine:
         if df is None or df.empty:
             return {"ok": False, "reason": "no intraday bars",
                     "entry_price": proposed_entry, "metrics": {}}
+
+        quality = self.quality_gate(df)
+        if not quality["ok"]:
+            logger.warning(f"{symbol} 盤中數據品質不合格: {quality['message']}")
+            return {"ok": False, "reason": f"intraday data [{quality['stage']}]: {quality['message']}",
+                    "entry_price": proposed_entry, "metrics": {"quality": quality}}
 
         vwap_series = self.compute_vwap(df)
         vwap = float(vwap_series.iloc[-1])
