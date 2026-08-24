@@ -21,6 +21,7 @@ def register(name, strategy_cls):
 def load_strategies(config=None):
     """Instantiate strategies listed in config; defaults to v45_core."""
     entries = (config or {}).get("strategies") or [{"name": "v45_core", "enabled": True}]
+    candle_cfg = (config or {}).get("candle", {}) or {}
     loaded = []
     for entry in entries:
         if isinstance(entry, str):
@@ -30,7 +31,8 @@ def load_strategies(config=None):
         if strategy_cls is None:
             logger.error(f"未知策略 '{name}'，已略過")
             continue
-        strategy = strategy_cls(entry)
+        strategy_config = {**entry, "_root_candle": candle_cfg}
+        strategy = strategy_cls(strategy_config)
         if not strategy.enabled:
             logger.info(f"策略 {name} 已停用")
             continue

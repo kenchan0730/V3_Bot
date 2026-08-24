@@ -80,9 +80,17 @@ def confidence_from_edges(edges, candle_strength):
 class TradingSignals:
     @staticmethod
     def get_combined_signal(df, price, vix, z_score, vol_ratio, ma20, ma50,
-                            zscore_min=0.5, min_candle_strength=0.4):
+                            zscore_min=0.5, min_candle_strength=0.4,
+                            symbol=None, candle_config=None):
         df = normalize_columns(df)
         candle = CandlePatterns.identify_all(df)
+        if symbol and candle_config:
+            try:
+                from candle_lab.bridge import apply_learned_adjustment
+                candle = apply_learned_adjustment(candle, symbol, candle_config)
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).warning(f"Candle Lab 调整跳过: {exc}")
         strength = candle.get("strength", 0) or 0
 
         edges = evaluate_edges(
@@ -110,6 +118,11 @@ class TradingSignals:
                 "edges": edge_names,
                 "strong_edges": strong_names,
                 "candle_driver": candle.get("driver"),
+                "learned_candle": {
+                    "blocked": candle.get("learned_blocked", False),
+                    "multiplier": candle.get("learned_multiplier"),
+                    "reason": candle.get("learned_reason"),
+                },
                 "reason": (
                     f"K線信號: {', '.join(candle['patterns'])} + V4.0確認 "
                     f"(共振 {confluence}/10, 強化 {len(strong_names)}/5)"

@@ -190,6 +190,23 @@ class TradingBot:
             return 0
         return self.order_mgr.hydrate_from_broker()
 
+    def _run_candle_lab_auto_learn(self):
+        """Background-friendly auto-learn: pulls OHLCV, no user images required."""
+        candle_cfg = self.config.get("candle", {}) or {}
+        if not candle_cfg.get("auto_learn_on_startup", False):
+            return
+        try:
+            from candle_lab.engine import CandleLabEngine
+            engine = CandleLabEngine(self.config)
+            result = engine.auto_learn(self.watchlist, save=True)
+            logger.info(
+                f"🕯️ Candle Lab 启动学习完成："
+                f"{result.get('symbols_scanned', 0)} 只股票，"
+                f"{len(result.get('patterns', {}))} 种形态"
+            )
+        except Exception as exc:
+            logger.warning(f"Candle Lab 自动学习跳过: {exc}")
+
     # ----- signals -----
 
     def request_shutdown(self, signum, _frame):
@@ -745,6 +762,7 @@ class TradingBot:
         self.refresh_vix()
         self.refresh_market_context(force=True)
         self.refresh_watchlist_if_due(force=True)
+        self._run_candle_lab_auto_learn()
         self.reconcile()
 
         cycle = 0

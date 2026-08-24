@@ -163,6 +163,12 @@ strategies:
 
 candle:
   min_strength: 0.4
+  use_learned_stats: true          # Candle Lab 胜率统计只读影响信号
+  min_learned_samples: 8
+  min_learned_win_rate: 0.40       # 低于此胜率的形态不触发 BUY
+  auto_learn_on_startup: true       # bot 启动时自动学习 watchlist
+  learn_forward_bars: 10            # 形态后 N 根 K 衡量胜负
+  learn_period: "6mo"
 
 emotion:
   max_daily_trades: 3

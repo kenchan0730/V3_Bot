@@ -38,6 +38,7 @@ class V45CoreStrategy(BaseStrategy):
         return True, "OK"
 
     def generate_signal(self, df, context):
+        candle_cfg = (self.config.get("_root_candle") or {}) if isinstance(self.config, dict) else {}
         return TradingSignals.get_combined_signal(
             df,
             context.price,
@@ -47,4 +48,6 @@ class V45CoreStrategy(BaseStrategy):
             context.ma20,
             context.ma50,
             zscore_min=context.zscore_min,
+            symbol=context.symbol,
+            candle_config=candle_cfg,
         )
