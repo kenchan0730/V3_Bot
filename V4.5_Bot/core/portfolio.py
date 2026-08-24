@@ -33,6 +33,8 @@ class Portfolio:
 
         # symbol -> {"quantity", "avg_cost", "price", "market_value", "stop"}
         self.positions = {}
+        # Stop prices recorded before broker fill (survives pre-position set_stop).
+        self.intended_stops = {}
 
     # ----- state sync -----
 
@@ -53,7 +55,10 @@ class Portfolio:
             if quantity == 0:
                 continue
             price = float(prices.get(symbol, avg_cost) or avg_cost)
-            existing_stop = self.positions.get(symbol, {}).get("stop")
+            existing_stop = (
+                self.positions.get(symbol, {}).get("stop")
+                or self.intended_stops.get(symbol)
+            )
             merged[symbol] = {
                 "quantity": quantity,
                 "avg_cost": avg_cost,
@@ -61,17 +66,31 @@ class Portfolio:
                 "market_value": abs(quantity) * price,
                 "stop": existing_stop,
             }
+        for symbol in set(self.intended_stops) - set(merged):
+            self.intended_stops.pop(symbol, None)
         self.positions = merged
         return self.positions
 
-    def set_stop(self, symbol, stop_price):
+    def record_intended_stop(self, symbol, stop_price):
+        """Remember stop before fill so protection checks can re-arm."""
+        if not stop_price or stop_price <= 0:
+            return
+        self.intended_stops[symbol] = float(stop_price)
         if symbol in self.positions:
-            self.positions[symbol]["stop"] = stop_price
+            self.positions[symbol]["stop"] = float(stop_price)
+
+    def set_stop(self, symbol, stop_price):
+        self.record_intended_stop(symbol, stop_price)
+
+    def clear_stop(self, symbol):
+        self.intended_stops.pop(symbol, None)
+        if symbol in self.positions:
+            self.positions[symbol].pop("stop", None)
 
     @property
     def stops(self):
-        """Known stop price per held symbol, for protection re-arming."""
-        result = {}
+        """Known stop price per symbol (held or pending), for protection re-arming."""
+        result = dict(self.intended_stops)
         for symbol, pos in self.positions.items():
             stop = pos.get("stop")
             if stop:

@@ -116,6 +116,7 @@ class ProfessionalMind:
         if heat.rebalance_needed:
             thoughts.append(f"再平衡提示: {heat.rebalance_reason}")
 
+        min_score = float(self.cfg.get("min_regime_score_to_trade", 40))
         if regime in (CRISIS, RISK_OFF):
             self._strategic_cash = True
             self._strategic_cash_reason = f"regime={regime} score={score:.0f}"
@@ -123,7 +124,12 @@ class ProfessionalMind:
             decision.approve = False
             decision.risk_multiplier = 0.0
             thoughts.append(f"專業空倉：{self._strategic_cash_reason}（保護本金）")
-        elif score < float(self.cfg.get("min_regime_score_to_trade", 40)):
+        elif score >= min_score:
+            if self._strategic_cash:
+                self._strategic_cash = False
+                self._strategic_cash_reason = ""
+                thoughts.append(f"regime 恢復 ({regime} score={score:.0f})，解除空倉")
+        elif score < min_score:
             decision.risk_multiplier *= 0.5
             thoughts.append(f"regime 偏弱 ({score:.0f})，半倉思維")
 

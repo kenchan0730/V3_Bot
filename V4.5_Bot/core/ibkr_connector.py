@@ -381,6 +381,23 @@ class IBKRConnector:
             logger.error(f"取消訂單失敗: {e}")
             return False
 
+    def modify_order_quantity(self, trade, quantity):
+        """Update an open order's quantity (e.g. after a partial entry fill)."""
+        if self.ib is None or trade is None or quantity <= 0:
+            return False
+        try:
+            order = getattr(trade, "order", trade)
+            order.totalQuantity = int(quantity)
+            contract = getattr(trade, "contract", None)
+            if contract is None:
+                return False
+            self.ib.placeOrder(contract, order)
+            logger.info(f"📊 已調整掛單數量 → {quantity} ({getattr(contract, 'symbol', '?')})")
+            return True
+        except Exception as e:
+            logger.error(f"調整訂單數量失敗: {e}")
+            return False
+
     def cancel_orders_for_symbol(self, symbol):
         """Cancel every working order on a symbol (e.g. before a manual exit)."""
         cancelled = 0

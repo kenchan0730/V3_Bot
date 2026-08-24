@@ -148,6 +148,90 @@ class OrderManager:
             )
         return parent
 
+    def hydrate_from_broker(self):
+        """Rebuild in-memory order tracking from broker open orders after restart."""
+        if self.ibkr is None:
+            return 0
+        trades = self.ibkr.get_open_orders()
+        added = 0
+        for trade in trades or []:
+            order = getattr(trade, "order", None)
+            contract = getattr(trade, "contract", None)
+            if order is None or contract is None:
+                continue
+            order_id = getattr(order, "orderId", None)
+            if order_id is None or order_id in self.orders:
+                continue
+
+            symbol = getattr(contract, "symbol", "")
+            action = getattr(order, "action", "")
+            quantity = float(getattr(order, "totalQuantity", 0) or 0)
+            parent_id = getattr(order, "parentId", None) or None
+            order_type = str(getattr(order, "orderType", "") or "").upper()
+
+            if parent_id:
+                role = "stop_loss" if order_type in ("STP", "STP LMT", "TRAIL") else "take_profit"
+            else:
+                role = "entry"
+
+            stop = None
+            target = None
+            entry = None
+            if role == "stop_loss":
+                stop = float(getattr(order, "auxPrice", 0) or 0) or None
+            elif role == "take_profit":
+                target = float(getattr(order, "lmtPrice", 0) or 0) or None
+            else:
+                entry = float(getattr(order, "lmtPrice", 0) or 0) or None
+
+            status_obj = getattr(trade, "orderStatus", None)
+            status = getattr(status_obj, "status", "SUBMITTED")
+            filled = float(getattr(status_obj, "filled", 0) or 0)
+
+            managed = self.track(
+                order_id, symbol, action, quantity,
+                entry=entry, stop=stop, target=target, trade=trade,
+                role=role, parent_id=parent_id,
+            )
+            managed.status = status
+            managed.filled_qty = filled
+            added += 1
+        if added:
+            logger.info(f"已從 broker 恢復 {added} 筆掛單追蹤")
+        return added
+
+    def _sync_bracket_children(self, entry_managed):
+        """Align protective leg quantities with the entry leg's filled size."""
+        filled_qty = int(entry_managed.filled_qty)
+        if filled_qty <= 0:
+            return []
+
+        updates = []
+        for managed in self.orders.values():
+            if managed.parent_id != entry_managed.order_id:
+                continue
+            if managed.role not in ("stop_loss", "take_profit"):
+                continue
+            if int(managed.quantity) == filled_qty:
+                continue
+
+            old_qty = managed.quantity
+            managed.quantity = float(filled_qty)
+            if self.ibkr and managed.trade is not None:
+                self.ibkr.modify_order_quantity(managed.trade, filled_qty)
+            updates.append({
+                "order_id": managed.order_id,
+                "symbol": managed.symbol,
+                "role": managed.role,
+                "old_qty": old_qty,
+                "new_qty": filled_qty,
+            })
+            logger.info(
+                f"📊 {managed.symbol} {managed.role} 數量同步 "
+                f"{old_qty:.0f} → {filled_qty}（部分成交）"
+            )
+        return updates
+
     def open_orders(self):
         return [o for o in self.orders.values() if o.is_open]
 
@@ -277,6 +361,10 @@ class OrderManager:
                     "remaining": managed.remaining,
                     "partial": managed.remaining > 0,
                 })
+                if managed.role == "entry":
+                    child_updates = self._sync_bracket_children(managed)
+                    if child_updates:
+                        updates[-1]["child_qty_sync"] = child_updates
                 if self.blotter:
                     self.blotter.log_fill(
                         managed.symbol, managed.action, newly_filled,

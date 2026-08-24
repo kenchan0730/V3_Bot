@@ -17,6 +17,7 @@ import yfinance as yf
 from core.blotter import Blotter
 from core.config_loader import load_config
 from core.data_utils import normalize_columns, quality_report
+from core.entry_pipeline import EntryPipeline
 from core.emotion_manager import EmotionManager
 from core.fundamental_filter import FundamentalFilter
 from core.ibkr_connector import IBKRConnector
@@ -92,6 +93,7 @@ class TradingBot:
         )
         self.emotion = EmotionManager(state=self.state, config=config.get("emotion", {}))
         self.portfolio = Portfolio(config.get("portfolio", {}))
+        self._restore_stops_from_state()
         # Portfolio owns the single-name cap; keep sizing aligned with it.
         self.risk_mgr.set_concentration_cap(self.portfolio.max_symbol_pct)
         self.fundamental = FundamentalFilter(config.get("fundamental", {}))
@@ -113,6 +115,19 @@ class TradingBot:
         self.watchlist_mgr.portfolio = self.portfolio
         self.intraday = IntradayEngine(config.get("intraday", {}), ibkr=self.ibkr)
         self.professional = ProfessionalMind(config.get("professional_mind", {}), state=self.state)
+        self.entry_pipeline = EntryPipeline(
+            self.risk_mgr,
+            self.portfolio,
+            self.professional,
+            self.intraday,
+            slippage_ticks=self.slippage_ticks,
+            tick_size=self.tick_size,
+            price_limit=self.price_limit,
+            max_shares=self.max_shares,
+            auto_trade=self.auto_trade,
+            ibkr=self.ibkr,
+            max_gross_pct_fn=self._effective_gross_cap,
+        )
         self.cycle_mind = None
         self.current_regime = None
         self.allow_new_entries = True
@@ -131,6 +146,17 @@ class TradingBot:
         self.vix_failures = 0
         self.vix_is_stale = False
         self.max_cycles = None
+
+    def _restore_stops_from_state(self):
+        """Seed intended stops from the last persisted portfolio snapshot."""
+        for symbol, pos in (self.state.positions or {}).items():
+            if isinstance(pos, dict) and pos.get("stop"):
+                self.portfolio.record_intended_stop(symbol, pos["stop"])
+
+    def _hydrate_broker_orders(self):
+        if not self.ibkr.is_connected():
+            return 0
+        return self.order_mgr.hydrate_from_broker()
 
     # ----- signals -----
 
@@ -245,6 +271,7 @@ class TradingBot:
             positions = self.ibkr.sync_positions()
             prices = {s: p.get("avg_cost", 0) for s, p in positions.items()}
             self.portfolio.sync(positions, prices)
+            self._hydrate_broker_orders()
 
             account = self.ibkr.get_account_values()
             if account.get("net_liquidation"):
@@ -355,111 +382,77 @@ class TradingBot:
         """Tighten book gross limit by regime exposure (e.g. RISK_OFF 25%)."""
         return min(self.portfolio.max_gross_exposure_pct, float(self.exposure))
 
-    # ----- pre-trade validation (H4) -----
-
-    def validate_pre_trade(self, symbol, shares, entry, stop):
-        if shares <= 0:
-            return False, "股數為 0"
-        if shares > self.max_shares:
-            return False, f"股數 {shares} > 上限 {self.max_shares}"
-        if not stop or stop <= 0:
-            return False, "缺少有效停損價"
-        if entry <= stop:
-            return False, "進場價必須高於停損價"
-
-        cost = shares * entry
-        stop_risk = (entry - stop) * shares
-        allowed, reason = self.portfolio.can_open(
-            symbol, cost, self.risk_mgr.total_capital, stop_risk,
-            max_gross_pct_override=self._effective_gross_cap(),
-        )
-        if not allowed:
-            return False, reason
-
-        if self.auto_trade and self.ibkr.is_connected():
-            buying_power = self.ibkr.get_buying_power()
-            if buying_power and cost > buying_power:
-                return False, f"購買力不足: 需 ${cost:.2f} > 可用 ${buying_power:.2f}"
-
-        return True, "OK"
-
     def entry_with_slippage(self, price):
-        return round(price + self.slippage_ticks * self.tick_size, 2)
+        return self.entry_pipeline.step_slippage(price)
+
+    def _log_entry_rejection(self, symbol, result):
+        stage = result.stage
+        reason = result.reason
+        if stage == "REGIME":
+            logger.info("   ⏳ Regime 禁止盤中進場")
+            self.blotter.log_rejection(symbol, reason, stage=stage)
+        elif stage == "INTRADAY":
+            logger.info(f"   ⏳ 盤中確認未通過: {reason}")
+            self.blotter.log_rejection(symbol, reason, stage=stage)
+        elif stage == "MIND":
+            logger.info(f"   🧠 專業心態拒絕: {reason}")
+            self.blotter.log_rejection(symbol, reason, stage=stage)
+        elif stage == "CONVICTION":
+            logger.info(f"   🧠 {reason}")
+            self.blotter.log_rejection(symbol, reason, stage=stage)
+        elif stage == "PRE_TRADE":
+            logger.info(f"   ⏳ 下單前驗證未通過: {reason}")
+            self.blotter.log_rejection(symbol, reason)
 
     # ----- trade handling -----
 
     def handle_buy(self, symbol, signal, quant, vol_ratio, df=None):
-        entry = self.entry_with_slippage(signal["entry"])
-        stop = signal["stop"]
-        target = signal.get("target1")
+        result = self.entry_pipeline.run(
+            symbol, signal, quant, df=df,
+            exposure=self.exposure,
+            allow_intraday_entries=self.allow_intraday_entries,
+            current_regime=self.current_regime.regime if self.current_regime else "NEUTRAL",
+            allow_new_entries=self.allow_new_entries,
+            vix=self.current_vix,
+            zscore_min=self.zscore_min,
+            breadth_score=self.breadth_score,
+            returns_cache=self.returns_cache,
+            intraday_mode=self.intraday_mode,
+        )
 
-        intraday_check = {"ok": True, "reason": "intraday skipped", "entry_price": entry, "metrics": {}}
-        if self.intraday_mode and self.intraday.cfg.get("enabled", True):
-            if not self.allow_intraday_entries:
-                logger.info(f"   ⏳ Regime 禁止盤中進場")
-                self.blotter.log_rejection(symbol, f"regime {self.current_regime.regime} blocks intraday", stage="REGIME")
-                return
-            intraday_check = self.intraday.evaluate_entry(symbol, signal.get("action", "STRONG_BUY"), entry)
-            if not intraday_check.get("ok"):
-                logger.info(f"   ⏳ 盤中確認未通過: {intraday_check.get('reason')}")
-                self.blotter.log_rejection(symbol, intraday_check.get("reason", ""), stage="INTRADAY")
-                return
-            entry = intraday_check.get("entry_price", entry)
+        if not result.proceed:
+            self._log_entry_rejection(symbol, result)
+            return
+
+        entry = result.entry
+        stop = result.stop
+        target = result.target
+        shares = result.shares
+        mind_decision = result.mind_decision
+        intraday_check = result.intraday_check
+
+        if (
+            self.intraday_mode
+            and self.intraday.cfg.get("enabled", True)
+            and intraday_check.get("ok")
+            and intraday_check.get("reason") != "intraday skipped"
+        ):
             logger.info(
                 f"   ✅ 盤中確認: {intraday_check.get('reason')} | "
                 f"VWAP {intraday_check.get('metrics', {}).get('vwap')} | 進場 ${entry:.2f}"
             )
 
-        shares = self.risk_mgr.calculate_position_size(entry, stop, self.price_limit, self.max_shares)
-        if self.exposure < 100:
-            shares = int(shares * self.exposure / 100)
-        scale = self.portfolio.correlation_scale(symbol, self.returns_cache)
-        if scale < 1.0:
-            shares = int(shares * scale)
-
-        mind_ctx = MarketContext(
-            symbol=symbol, price=entry, vix=self.current_vix, zscore_min=self.zscore_min,
-            exposure=self.exposure, breadth_score=self.breadth_score, quant=quant,
-            regime=self.current_regime.regime if self.current_regime else "NEUTRAL",
-            allow_new_entries=self.allow_new_entries,
-        )
-        mind_decision = self.professional.approve_entry(
-            symbol, signal, df, mind_ctx, self.portfolio, self.risk_mgr,
-            entry, stop, shares, is_day_trade=False,
-        )
-        if not mind_decision.approve:
-            reason = "; ".join(mind_decision.reasons or mind_decision.thoughts or ["mind rejected"])
-            logger.info(f"   🧠 專業心態拒絕: {reason}")
-            self.blotter.log_rejection(symbol, reason, stage="MIND")
-            return
-        if mind_decision.stop_override:
-            stop = mind_decision.stop_override
-        if mind_decision.shares_scale and mind_decision.shares_scale < 1.0:
-            shares = max(1, int(shares * mind_decision.shares_scale))
-        if mind_decision.risk_multiplier < 1.0:
-            shares = max(1, int(shares * mind_decision.risk_multiplier))
-
-        conviction = self.professional.conviction_factor(mind_decision.execution_score)
-        if conviction <= 0:
-            reason = f"共振不足 (exec {mind_decision.execution_score}/10)"
-            logger.info(f"   🧠 {reason}")
-            self.blotter.log_rejection(symbol, reason, stage="CONVICTION")
-            return
-        if conviction < 1.0:
-            shares = max(1, int(shares * conviction))
+        if result.conviction < 1.0:
             logger.info(
                 f"   🎚️ 共振分級 exec {mind_decision.execution_score}/10 "
-                f"→ 倉位 x{conviction:.2f} = {shares} 股"
+                f"→ 倉位 x{result.conviction:.2f} = {shares} 股"
             )
 
-        if mind_decision.thoughts:
-            logger.info(f"   🧠 {' | '.join(mind_decision.thoughts[:3])} (exec {mind_decision.execution_score}/10)")
-
-        ok, reason = self.validate_pre_trade(symbol, shares, entry, stop)
-        if not ok:
-            logger.info(f"   ⏳ 下單前驗證未通過: {reason}")
-            self.blotter.log_rejection(symbol, reason)
-            return
+        if mind_decision and mind_decision.thoughts:
+            logger.info(
+                f"   🧠 {' | '.join(mind_decision.thoughts[:3])} "
+                f"(exec {mind_decision.execution_score}/10)"
+            )
 
         cost = shares * entry
         logger.info("   🎯 買入信號觸發！")
@@ -488,7 +481,7 @@ class TradingBot:
             return
 
         self.order_mgr.track_bracket(bracket)
-        self.portfolio.set_stop(symbol, stop)
+        self.portfolio.record_intended_stop(symbol, stop)
         self.blotter.log_order(
             symbol, "BUY", shares, bracket.get("parent_id"), entry, stop, target,
             reason=signal.get("reason", ""),
@@ -682,6 +675,7 @@ class TradingBot:
                     self.notifier.alert_disconnect("啟動時無法連線 IBKR，auto_trade 已自動關閉")
             else:
                 self.was_connected = True
+                self._hydrate_broker_orders()
         except Exception as e:
             logger.exception(f"IBKR 初始化失敗: {e}")
             self.notifier.alert_exception("ibkr_connect", e)

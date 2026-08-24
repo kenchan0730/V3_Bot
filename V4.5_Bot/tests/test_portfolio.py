@@ -41,6 +41,15 @@ def test_sync_preserves_stop(portfolio):
     assert portfolio.positions["AAA"]["stop"] == 18.0
 
 
+def test_intended_stop_before_fill(portfolio):
+    portfolio.record_intended_stop("AAA", 18.0)
+    assert portfolio.stops == {"AAA": 18.0}
+    assert "AAA" not in portfolio.positions
+
+    portfolio.sync({"AAA": {"quantity": 10, "avg_cost": 20.0}}, {"AAA": 20.0})
+    assert portfolio.positions["AAA"]["stop"] == 18.0
+
+
 def test_open_risk_uses_stops(portfolio):
     portfolio.sync({"AAA": {"quantity": 10, "avg_cost": 20.0}}, {"AAA": 20.0})
     portfolio.set_stop("AAA", 18.0)

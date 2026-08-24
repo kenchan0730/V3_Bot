@@ -8,6 +8,7 @@ import logging
 
 from core.data_utils import normalize_columns
 from core.portfolio import Portfolio
+from core.position_sizer import scale_shares
 from core.quant_engine import QuantEngine
 from core.risk_manager import RiskManager
 from core.strategies import MarketContext, load_strategies
@@ -275,16 +276,16 @@ class BacktestEngine:
         if decision.stop_override:
             stop = decision.stop_override
         if decision.shares_scale and decision.shares_scale < 1.0:
-            shares = max(0, int(shares * decision.shares_scale))
+            shares = scale_shares(shares, decision.shares_scale, min_shares=0)
         if decision.risk_multiplier < 1.0:
-            shares = max(0, int(shares * decision.risk_multiplier))
+            shares = scale_shares(shares, decision.risk_multiplier, min_shares=0)
 
         factor = self.professional.conviction_factor(decision.execution_score)
         if factor <= 0:
             self.mind_rejections += 1
             return False, stop, 0
         if factor < 1.0:
-            shares = max(0, int(shares * factor))
+            shares = scale_shares(shares, factor, min_shares=0)
 
         return True, stop, shares
 
