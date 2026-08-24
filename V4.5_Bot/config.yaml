@@ -187,10 +187,42 @@ sector:
   enabled: true
 
 news:
-  enabled: false
+  enabled: true
   finnhub_key: ${FINNHUB_KEY:-}
+  alpha_vantage_key: ${ALPHA_VANTAGE_KEY:-}
   sentiment_threshold: -0.2
   days_to_analyze: 3
+  cache_ttl_seconds: 300
+  fail_mode: open          # open=無新聞放行 | closed=來源全失敗則阻擋
+  block_on_negative: true
+  max_headlines: 20
+  sources:
+    - name: yahoo
+      enabled: true
+      weight: 1.0
+    - name: google_rss
+      enabled: true
+      weight: 0.8
+    - name: finnhub
+      enabled: true
+      weight: 1.0
+      api_key: ${FINNHUB_KEY:-}
+    - name: alpha_vantage
+      enabled: false
+      weight: 1.2
+      api_key: ${ALPHA_VANTAGE_KEY:-}
+
+market_data:
+  daily_sources: [ibkr, yfinance]
+  intraday_sources: [ibkr, alpaca, yfinance]
+  quote_sources: [ibkr, finnhub, yfinance, alpaca]
+  max_quote_age_seconds: 900
+  warn_drift_pct: 2.0
+  block_stale_quote: false
+  alpaca_api_key: ${ALPACA_API_KEY:-}
+  alpaca_api_secret: ${ALPACA_API_SECRET:-}
+  alpaca:
+    data_url: https://data.alpaca.markets
 
 notifier:
   enabled: false

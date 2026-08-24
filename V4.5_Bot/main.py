@@ -25,12 +25,14 @@ from core.ibkr_connector import IBKRConnector
 from core.intraday_engine import IntradayEngine
 from core.logging_setup import configure_logging
 from core.market_breadth import MarketBreadth
+from core.market_data_sources import fetch_daily_bars
 from core.news_sentiment import NewsSentiment
 from core.notifier import Notifier
 from core.order_manager import OrderManager
 from core.portfolio import Portfolio
 from core.professional_mind import ProfessionalMind
 from core.quant_engine import QuantEngine
+from core.realtime_pulse import RealtimePulse
 from core.regime import CRISIS, RegimeDetector
 from core.risk_manager import RiskManager
 from core.sector_tracker import SectorTracker
@@ -71,6 +73,7 @@ class TradingBot:
         self.max_data_failures = int(data_cfg.get("max_consecutive_failures", 3))
         self.context_refresh_seconds = int(data_cfg.get("context_refresh_seconds", 3600))
         self.fetch_timeout = int(data_cfg.get("fetch_timeout_seconds", 30))
+        self.market_data_cfg = self._build_market_data_config(config)
 
         self.slippage_ticks = float(exec_cfg.get("slippage_ticks", 1))
         self.tick_size = float(exec_cfg.get("tick_size", 0.01))
@@ -100,6 +103,10 @@ class TradingBot:
         self.risk_mgr.set_concentration_cap(self.portfolio.max_symbol_pct)
         self.fundamental = FundamentalFilter(config.get("fundamental", {}))
         self.news = NewsSentiment(config.get("news", {}))
+        self.realtime_pulse = RealtimePulse(
+            config.get("market_data", {}),
+            ibkr=None,
+        )
         self.strategies = load_strategies(config)
 
         ibkr_cfg = config.get("ibkr", {}) or {}
@@ -116,7 +123,12 @@ class TradingBot:
             blotter=self.blotter, notifier=self.notifier,
         )
         self.watchlist_mgr.portfolio = self.portfolio
-        self.intraday = IntradayEngine(config.get("intraday", {}), ibkr=self.ibkr)
+        self.intraday = IntradayEngine(
+            config.get("intraday", {}),
+            ibkr=self.ibkr,
+            market_data_config=self.market_data_cfg,
+        )
+        self.realtime_pulse.ibkr = self.ibkr
         self.professional = ProfessionalMind(config.get("professional_mind", {}), state=self.state)
         self.entry_pipeline = EntryPipeline(
             self.risk_mgr,
@@ -170,6 +182,25 @@ class TradingBot:
                 "live 模式需要明確確認：請在 data/.env 設定 LIVE_TRADING_CONFIRM=yes"
             )
         logger.warning("⚠️ LIVE TRADING MODE — port=7496 已確認，請再次核對 TWS 帳戶")
+
+    @staticmethod
+    def _build_market_data_config(config):
+        """Merge data/intraday/news keys into one fetcher config."""
+        data_cfg = config.get("data", {}) or {}
+        md_cfg = dict(config.get("market_data", {}) or {})
+        news_cfg = config.get("news", {}) or {}
+        md_cfg.setdefault("min_bars", data_cfg.get("min_bars", 60))
+        md_cfg.setdefault("fetch_timeout_seconds", data_cfg.get("fetch_timeout_seconds", 30))
+        md_cfg.setdefault("finnhub_key", news_cfg.get("finnhub_key", ""))
+        intraday_cfg = config.get("intraday", {}) or {}
+        md_cfg.setdefault("bar_size", intraday_cfg.get("bar_size", "5 mins"))
+        md_cfg.setdefault("fallback_interval", intraday_cfg.get("fallback_interval", "5m"))
+        md_cfg.setdefault("min_intraday_bars", intraday_cfg.get("min_intraday_bars", 12))
+        alpaca = md_cfg.get("alpaca") or {}
+        alpaca.setdefault("api_key", md_cfg.get("alpaca_api_key", ""))
+        alpaca.setdefault("api_secret", md_cfg.get("alpaca_api_secret", ""))
+        md_cfg["alpaca"] = alpaca
+        return md_cfg
 
     def _entries_permitted(self):
         """Combine regime, VIX freshness and stop-protection gates."""
@@ -396,29 +427,12 @@ class TradingBot:
 
     # ----- data (H7) -----
 
-    def _yf_daily(self, symbol):
-        """yfinance daily bars with a timeout so a hung request cannot stall the cycle."""
-        kwargs = dict(period="6mo", interval="1d", progress=False)
-        try:
-            return yf.download(symbol, timeout=self.fetch_timeout, **kwargs)
-        except TypeError:
-            return yf.download(symbol, **kwargs)
-
     def fetch_symbol_data(self, symbol):
-        raw = None
-        if self.ibkr.is_connected():
-            try:
-                raw = self.ibkr.get_historical_data(symbol, duration="6 M", bar_size="1 day")
-            except Exception as e:
-                logger.warning(f"{symbol} IBKR 數據錯誤: {e}")
-                raw = None
-        if raw is None or len(raw) < self.min_bars:
-            try:
-                raw = self._yf_daily(symbol)
-            except Exception as e:
-                logger.warning(f"{symbol} yfinance 數據錯誤: {e}")
-                raw = None
-
+        raw, source = fetch_daily_bars(
+            symbol,
+            ibkr=self.ibkr,
+            config=self.market_data_cfg,
+        )
         if raw is None or len(raw) == 0:
             failures = self.data_failures.get(symbol, 0) + 1
             self.data_failures[symbol] = failures
@@ -428,6 +442,8 @@ class TradingBot:
             return None
 
         df = normalize_columns(raw)
+        if source:
+            logger.debug("%s daily bars source=%s", symbol, source)
         report = quality_report(
             df, min_bars=self.min_bars,
             max_age_trading_days=self.max_age_trading_days,
@@ -602,6 +618,7 @@ class TradingBot:
                     logger.info(f"   ⏳ {news_msg}")
                     self.blotter.log_rejection(symbol, news_msg, stage="NEWS")
                     return
+                logger.info(f"   📰 {news_msg}")
             except Exception as e:
                 logger.warning(f"新聞情緒檢查失敗 {symbol}: {e}")
 
@@ -610,6 +627,14 @@ class TradingBot:
             return
 
         price = float(df["close"].iloc[-1])
+        pulse = self.realtime_pulse.check(symbol, last_close=price)
+        if not pulse.get("ok", True):
+            reason = pulse.get("reason", "即時報價過舊")
+            logger.info(f"   ⏳ {reason}")
+            self.blotter.log_rejection(symbol, reason, stage="REALTIME")
+            return
+        if pulse.get("quote", {}).get("price"):
+            price = float(pulse["quote"]["price"])
         if price <= 0 or price > self.price_limit:
             logger.info(f"   ⏳ 股價 ${price:.2f} 超出上限 ${self.price_limit}")
             self.blotter.log_rejection(symbol, f"股價 {price:.2f} 超出上限")

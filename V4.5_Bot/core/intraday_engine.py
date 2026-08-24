@@ -14,9 +14,9 @@ from datetime import datetime, time as dt_time
 
 import pandas as pd
 import pytz
-import yfinance as yf
 
-from core.data_utils import intraday_quality_report, normalize_columns
+from core.data_utils import intraday_quality_report
+from core.market_data_sources import fetch_intraday_bars
 
 logger = logging.getLogger(__name__)
 
@@ -42,69 +42,26 @@ class IntradayEngine:
         "fetch_timeout_seconds": 20,
     }
 
-    def __init__(self, config=None, ibkr=None):
+    def __init__(self, config=None, ibkr=None, market_data_config=None):
         cfg = {**self.DEFAULTS, **(config or {})}
         self.cfg = cfg
         self.ibkr = ibkr
+        self.market_data_config = market_data_config or {}
 
     def fetch_bars(self, symbol):
         """Return today's intraday OHLCV (lowercase columns, DatetimeIndex ET)."""
-        df = None
-        if self.ibkr and self.ibkr.is_connected():
-            try:
-                raw = self.ibkr.get_historical_data(
-                    symbol, duration="1 D", bar_size=self.cfg["bar_size"]
-                )
-                if raw is not None and len(raw) >= self.cfg["min_intraday_bars"]:
-                    df = normalize_columns(raw)
-                    if "date" in df.columns:
-                        df = df.set_index("date")
-            except Exception as exc:
-                logger.warning(f"{symbol} IBKR intraday failed: {exc}")
-
-        if df is None or len(df) < self.cfg["min_intraday_bars"]:
-            df = self._yf_intraday(symbol)
-
+        merged_cfg = {
+            **self.market_data_config,
+            "bar_size": self.cfg["bar_size"],
+            "fallback_interval": self.cfg["fallback_interval"],
+            "min_intraday_bars": self.cfg["min_intraday_bars"],
+            "fetch_timeout_seconds": self.cfg.get("fetch_timeout_seconds", 20),
+        }
+        df, source = fetch_intraday_bars(symbol, ibkr=self.ibkr, config=merged_cfg)
         if df is None or df.empty:
             return None
-
-        if not isinstance(df.index, pd.DatetimeIndex):
-            df.index = pd.to_datetime(df.index)
-
-        if df.index.tz is None:
-            df.index = df.index.tz_localize(ET, ambiguous="NaT", nonexistent="NaT")
-        else:
-            df.index = df.index.tz_convert(ET)
-
-        df = df.sort_index()
-        today = datetime.now(ET).date()
-        df = df[df.index.date == today]
-        return df if len(df) >= max(3, self.cfg["min_intraday_bars"] // 4) else df
-
-    def _yf_intraday(self, symbol):
-        try:
-            raw = yf.download(
-                symbol, period="1d", interval=self.cfg["fallback_interval"],
-                progress=False, prepost=False,
-                timeout=int(self.cfg.get("fetch_timeout_seconds", 20)),
-            )
-            if raw is None or raw.empty:
-                return None
-            return normalize_columns(raw)
-        except TypeError:
-            # Older yfinance builds do not accept a timeout kwarg.
-            try:
-                raw = yf.download(
-                    symbol, period="1d", interval=self.cfg["fallback_interval"],
-                    progress=False, prepost=False,
-                )
-                return normalize_columns(raw) if raw is not None and not raw.empty else None
-            except Exception as exc:
-                logger.warning(f"{symbol} yfinance intraday failed: {exc}")
-                return None
-        except Exception as exc:
-            logger.warning(f"{symbol} yfinance intraday failed: {exc}")
-            return None
+        self._last_source = source
+        return df
 
     def quality_gate(self, df):
         """Apply the daily-equivalent quality checks to intraday bars."""
@@ -194,12 +151,15 @@ class IntradayEngine:
         dist_pct = abs(last_close - vwap) / vwap * 100.0 if vwap else 0.0
 
         orb = self.opening_range(df)
+        source = getattr(self, "_last_source", None)
+        if not source:
+            source = "ibkr" if self.ibkr and self.ibkr.is_connected() else "yfinance"
         metrics = {
             "vwap": round(vwap, 4),
             "last": round(last_close, 4),
             "distance_from_vwap_pct": round(dist_pct, 3),
             "bars": len(df),
-            "source": "ibkr" if self.ibkr and self.ibkr.is_connected() else "yfinance",
+            "source": source,
         }
         if orb:
             metrics["or_high"] = round(orb["high"], 4)
