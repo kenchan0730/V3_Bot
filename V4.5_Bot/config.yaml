@@ -90,7 +90,7 @@ trading:
   market_hours_only: true
   scan_interval_seconds: 300
   scan_interval_intraday: 60   # 盤中模式下的掃描間隔（秒）
-  intraday_mode: true          # 啟用盤中進場確認（需 IBKR 或 yfinance 5m 備援）
+  intraday_mode: false         # Tier A：關閉盤中二次確認，提高信號成交率
 
 regime:
   enabled: true
@@ -106,8 +106,8 @@ regime:
   risk_off_exposure: 25
   crisis_exposure: 0
   risk_on_zscore_min: 0.5
-  neutral_zscore_min: 0.8
-  risk_off_zscore_min: 1.2
+  neutral_zscore_min: 0.6      # Tier A：0.8 → 0.6
+  risk_off_zscore_min: 1.0     # Tier A：1.2 → 1.0（風險關閉時略放寬）
   crisis_zscore_min: 999.0
   credit_stress_pct: -2.0
   halt_on_crisis: true
@@ -157,12 +157,12 @@ watchlist:
 strategies:
   - name: v45_core
     enabled: true
-    require_structure: true
-    min_vol_ratio_high: 1.5
+    require_structure: false      # Tier A：不要求 price>MA20>MA50 預過濾
+    min_vol_ratio_high: 1.3      # Tier A：1.5 → 1.3
     max_vol_ratio_low: 0.8
 
 candle:
-  min_strength: 0.4
+  min_strength: 0.35             # Tier A：0.4 → 0.35
   use_learned_stats: true          # Candle Lab 胜率统计只读影响信号
   min_learned_samples: 8
   min_learned_win_rate: 0.40       # 低于此胜率的形态不触发 BUY

@@ -104,7 +104,11 @@ class BacktestEngine:
         self.strategies = load_strategies(self.config)
         self.price_limit = float(self.config.get("trading", {}).get("price_limit", 1e9))
         self.max_shares = int(self.config.get("trading", {}).get("max_shares", 100))
-        self.zscore_min = float(self.config.get("zscore", {}).get("best_zone_min", 0.5))
+        regime_cfg = self.config.get("regime", {}) or {}
+        zscore_cfg = self.config.get("zscore", {}) or {}
+        self.zscore_min = float(
+            regime_cfg.get("neutral_zscore_min", zscore_cfg.get("best_zone_min", 0.5))
+        )
         self.factor_weights = (self.config.get("zscore", {}) or {}).get("weights") or None
 
         exec_cfg = self.config.get("execution", {}) or {}

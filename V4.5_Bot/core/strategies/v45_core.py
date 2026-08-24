@@ -39,6 +39,7 @@ class V45CoreStrategy(BaseStrategy):
 
     def generate_signal(self, df, context):
         candle_cfg = (self.config.get("_root_candle") or {}) if isinstance(self.config, dict) else {}
+        min_strength = float(candle_cfg.get("min_strength", 0.4))
         return TradingSignals.get_combined_signal(
             df,
             context.price,
@@ -48,6 +49,10 @@ class V45CoreStrategy(BaseStrategy):
             context.ma20,
             context.ma50,
             zscore_min=context.zscore_min,
+            min_candle_strength=min_strength,
+            min_vol_ratio_high=self.min_vol_ratio_high,
+            max_vol_ratio_low=self.max_vol_ratio_low,
+            require_trend=self.require_structure,
             symbol=context.symbol,
             candle_config=candle_cfg,
         )

@@ -31,20 +31,23 @@ def _label(confidence):
 
 
 def evaluate_edges(price, vix, z_score, vol_ratio, ma20, ma50, candle,
-                   zscore_min=0.5, min_candle_strength=0.4):
+                   zscore_min=0.5, min_candle_strength=0.4,
+                   min_vol_ratio_high=1.5, max_vol_ratio_low=0.8,
+                   require_trend=True):
     """Score each edge as passed (mandatory) and/or strongly confirmed (bonus)."""
     strength = candle.get("strength", 0) or 0
+    trend_passed = price > ma20 > ma50 if require_trend else True
     edges = {
         "zscore": {
             "passed": zscore_min <= z_score <= 1.5,
             "strong": ZSCORE_SWEET_SPOT[0] <= z_score <= ZSCORE_SWEET_SPOT[1],
         },
         "trend": {
-            "passed": price > ma20 > ma50,
+            "passed": trend_passed,
             "strong": ma50 > 0 and (ma20 - ma50) / ma50 * 100 >= TREND_SPREAD_PCT,
         },
         "volume": {
-            "passed": vol_ratio > 1.5 or vol_ratio < 0.8,
+            "passed": vol_ratio > min_vol_ratio_high or vol_ratio < max_vol_ratio_low,
             "strong": vol_ratio >= STRONG_VOL_RATIO,
         },
         "volatility": {
@@ -81,6 +84,8 @@ class TradingSignals:
     @staticmethod
     def get_combined_signal(df, price, vix, z_score, vol_ratio, ma20, ma50,
                             zscore_min=0.5, min_candle_strength=0.4,
+                            min_vol_ratio_high=1.5, max_vol_ratio_low=0.8,
+                            require_trend=True,
                             symbol=None, candle_config=None):
         df = normalize_columns(df)
         candle = CandlePatterns.identify_all(df)
@@ -96,6 +101,8 @@ class TradingSignals:
         edges = evaluate_edges(
             price, vix, z_score, vol_ratio, ma20, ma50, candle,
             zscore_min=zscore_min, min_candle_strength=min_candle_strength,
+            min_vol_ratio_high=min_vol_ratio_high, max_vol_ratio_low=max_vol_ratio_low,
+            require_trend=require_trend,
         )
         confluence = confluence_from_edges(edges)
         edge_names = sorted(name for name, e in edges.items() if e["passed"])
