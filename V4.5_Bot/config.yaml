@@ -59,6 +59,7 @@ execution:
   slippage_ticks: 1
   tick_size: 0.01
   order_timeout_seconds: 300
+  protection_poll_interval_seconds: 60   # 有持倉時，掃描間隔內額外檢查停損
 
 data:
   min_bars: 60

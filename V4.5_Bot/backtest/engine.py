@@ -1,14 +1,15 @@
 """Replay historical bars through the same strategy and risk components used live.
 
-Deliberately reuses QuantEngine, the strategy plugins and RiskManager so the
-backtest cannot drift from production behaviour.
+Deliberately reuses QuantEngine, the strategy plugins, RiskManager and
+``EntryPipeline`` so the backtest cannot drift from production behaviour.
 """
 
 import logging
 
 from core.data_utils import normalize_columns
+from core.entry_pipeline import EntryPipeline
+from core.intraday_engine import IntradayEngine
 from core.portfolio import Portfolio
-from core.position_sizer import scale_shares
 from core.quant_engine import QuantEngine
 from core.risk_manager import RiskManager
 from core.strategies import MarketContext, load_strategies
@@ -90,10 +91,8 @@ class BacktestResult:
 class BacktestEngine:
     """Bar-by-bar replay with bracket-style exits (stop / target / timeout).
 
-    To keep results comparable with live trading the replay also applies the
-    live entry slippage, a commission model, and (optionally) the same
-    ``ProfessionalMind`` approval chain that gates real entries. Without those
-    the backtest systematically overstates achievable performance.
+    Entry evaluation routes through the same ``EntryPipeline`` used live so
+    sizing, mind approval and portfolio gates stay aligned.
     """
 
     def __init__(self, config=None, initial_capital=10000.0, warmup_bars=60,
@@ -120,6 +119,7 @@ class BacktestEngine:
 
         self.professional = professional_mind
         self.mind_rejections = 0
+        self._disabled_intraday = IntradayEngine({"enabled": False})
 
     def entry_with_slippage(self, price):
         """Mirror ``TradingBot.entry_with_slippage`` so fills are comparable."""
@@ -138,6 +138,24 @@ class BacktestEngine:
             return 0.0
         return round(max(self.commission_minimum, shares * self.commission_per_share), 4)
 
+    def _build_entry_pipeline(self, risk_mgr, portfolio):
+        """Shared buy path with live bot; backtest uses min_shares=0 floor."""
+        slippage = self.slippage_ticks if self.apply_costs else 0.0
+        gross_cap = float(self.config.get("portfolio", {}).get("max_gross_exposure_pct", 100.0))
+        return EntryPipeline(
+            risk_mgr,
+            portfolio,
+            self.professional,
+            self._disabled_intraday,
+            slippage_ticks=slippage,
+            tick_size=self.tick_size,
+            price_limit=self.price_limit,
+            max_shares=self.max_shares,
+            auto_trade=False,
+            min_shares=0,
+            max_gross_pct_fn=lambda: gross_cap,
+        )
+
     def run(self, symbol, df, vix=18.0):
         df = normalize_columns(df).reset_index(drop=True)
         result = BacktestResult(self.initial_capital)
@@ -149,6 +167,8 @@ class BacktestEngine:
             state=state,
         )
         portfolio = Portfolio(self.config.get("portfolio", {}))
+        risk_mgr.set_concentration_cap(portfolio.max_symbol_pct)
+        pipeline = self._build_entry_pipeline(risk_mgr, portfolio)
         open_trade = None
 
         for index in range(self.warmup_bars, len(df)):
@@ -204,27 +224,31 @@ class BacktestEngine:
                 if signal.get("action") != "STRONG_BUY":
                     continue
 
-                entry = self.entry_with_slippage(signal["entry"])
-                stop = signal["stop"]
-                shares = risk_mgr.calculate_position_size(entry, stop, self.price_limit, self.max_shares)
-                if shares <= 0:
-                    continue
-
-                approved, stop, shares = self._apply_mind(
-                    symbol, signal, window, context, portfolio, risk_mgr,
-                    entry, stop, shares,
+                entry_result = pipeline.run(
+                    symbol, signal, quant, df=window,
+                    exposure=100,
+                    allow_intraday_entries=False,
+                    current_regime="NEUTRAL",
+                    allow_new_entries=True,
+                    vix=vix,
+                    zscore_min=self.zscore_min,
+                    intraday_mode=False,
                 )
-                if not approved or shares <= 0:
+                if not entry_result.proceed:
+                    if entry_result.stage in ("MIND", "CONVICTION"):
+                        self.mind_rejections += 1
                     continue
 
-                cost = shares * entry
-                allowed, _ = portfolio.can_open(symbol, cost, risk_mgr.total_capital, (entry - stop) * shares)
-                if not allowed:
+                entry = entry_result.entry
+                stop = entry_result.stop
+                shares = entry_result.shares
+                if shares <= 0:
                     continue
 
                 open_trade = {
                     "index": index, "entry": entry, "stop": stop,
-                    "target": signal.get("target1"), "shares": shares,
+                    "target": entry_result.target or signal.get("target1"),
+                    "shares": shares,
                     "commission": self.commission(shares),
                 }
                 portfolio.sync({symbol: {"quantity": shares, "avg_cost": entry}}, {symbol: entry})
@@ -253,41 +277,6 @@ class BacktestEngine:
 
         result.mind_rejections = self.mind_rejections
         return result
-
-    def _apply_mind(self, symbol, signal, window, context, portfolio, risk_mgr,
-                    entry, stop, shares):
-        """Run the live approval chain so backtest entries face the same gates."""
-        if self.professional is None:
-            return True, stop, shares
-
-        try:
-            decision = self.professional.approve_entry(
-                symbol, signal, window, context, portfolio, risk_mgr,
-                entry, stop, shares, is_day_trade=False,
-            )
-        except Exception as exc:
-            logger.warning(f"{symbol} backtest mind evaluation failed: {exc}")
-            return True, stop, shares
-
-        if not decision.approve:
-            self.mind_rejections += 1
-            return False, stop, 0
-
-        if decision.stop_override:
-            stop = decision.stop_override
-        if decision.shares_scale and decision.shares_scale < 1.0:
-            shares = scale_shares(shares, decision.shares_scale, min_shares=0)
-        if decision.risk_multiplier < 1.0:
-            shares = scale_shares(shares, decision.risk_multiplier, min_shares=0)
-
-        factor = self.professional.conviction_factor(decision.execution_score)
-        if factor <= 0:
-            self.mind_rejections += 1
-            return False, stop, 0
-        if factor < 1.0:
-            shares = scale_shares(shares, factor, min_shares=0)
-
-        return True, stop, shares
 
     def _check_exit(self, bar, trade, index):
         low, high = float(bar["low"]), float(bar["high"])

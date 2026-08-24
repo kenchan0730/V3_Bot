@@ -147,9 +147,10 @@ def test_zero_conviction_blocks_entry():
     assert result.mind_rejections > 0
 
 
-def test_mind_failure_does_not_break_backtest():
+def test_mind_failure_rejects_entries_not_fail_open():
+    """Mind exceptions must reject entries (E1) — backtest must not silently approve."""
     result = _run(BacktestEngine(
         CONFIG, initial_capital=10000.0, max_hold_bars=10, professional_mind=_Exploding(),
     ))
-    assert isinstance(result.summary(), dict)
-    assert result.trades
+    assert result.trades == []
+    assert result.mind_rejections > 0

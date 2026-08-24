@@ -7,6 +7,7 @@
 
 import argparse
 import logging
+import os
 import signal
 import sys
 import time
@@ -75,6 +76,7 @@ class TradingBot:
         self.tick_size = float(exec_cfg.get("tick_size", 0.01))
         self.use_bracket_orders = bool(exec_cfg.get("use_bracket_orders", True))
         self.order_timeout = int(exec_cfg.get("order_timeout_seconds", 300))
+        self.protection_poll_interval = int(exec_cfg.get("protection_poll_interval_seconds", 60))
 
         total_capital = float(config.get("capital", {}).get("total", 385.0))
 
@@ -101,6 +103,7 @@ class TradingBot:
         self.strategies = load_strategies(config)
 
         ibkr_cfg = config.get("ibkr", {}) or {}
+        self._validate_live_config(ibkr_cfg)
         self.ibkr = IBKRConnector(
             ibkr_cfg.get("host", "127.0.0.1"),
             ibkr_cfg.get("port", 7497),
@@ -132,6 +135,8 @@ class TradingBot:
         self.current_regime = None
         self.allow_new_entries = True
         self.allow_intraday_entries = True
+        self.vix_blocks_entries = False
+        self.stop_protection_blocks_entries = False
 
         self.seen_exec_ids = set()
         self.data_failures = {}
@@ -146,6 +151,33 @@ class TradingBot:
         self.vix_failures = 0
         self.vix_is_stale = False
         self.max_cycles = None
+        self.last_protection_check = 0.0
+
+    def _validate_live_config(self, ibkr_cfg):
+        """Refuse to start live trading on the wrong IBKR port without explicit confirm."""
+        mode = str(ibkr_cfg.get("account_mode", "paper")).lower()
+        port = int(ibkr_cfg.get("port", 7497))
+        if mode != "live":
+            return
+        if port != 7496:
+            raise SystemExit(
+                f"IBKR account_mode=live 要求 port=7496（TWS 實盤），目前為 {port}。"
+                "請修正 data/.env 後重試。"
+            )
+        confirm = os.environ.get("LIVE_TRADING_CONFIRM", "").strip().lower()
+        if confirm not in ("yes", "true", "1"):
+            raise SystemExit(
+                "live 模式需要明確確認：請在 data/.env 設定 LIVE_TRADING_CONFIRM=yes"
+            )
+        logger.warning("⚠️ LIVE TRADING MODE — port=7496 已確認，請再次核對 TWS 帳戶")
+
+    def _entries_permitted(self):
+        """Combine regime, VIX freshness and stop-protection gates."""
+        return (
+            self.allow_new_entries
+            and not self.vix_blocks_entries
+            and not self.stop_protection_blocks_entries
+        )
 
     def _restore_stops_from_state(self):
         """Seed intended stops from the last persisted portfolio snapshot."""
@@ -165,9 +197,15 @@ class TradingBot:
         self.shutdown_requested = True
 
     def _sleep(self, seconds):
-        """Interruptible sleep so shutdown stays responsive."""
+        """Interruptible sleep; poll stop protection while holding open positions."""
         deadline = time.time() + seconds
         while time.time() < deadline and not self.shutdown_requested:
+            if (
+                self.portfolio.open_position_count() > 0
+                and time.time() - self.last_protection_check >= self.protection_poll_interval
+            ):
+                self.verify_stop_protection()
+                self.last_protection_check = time.time()
             time.sleep(min(2, max(0, deadline - time.time())))
 
     # ----- market context (M14) -----
@@ -301,6 +339,7 @@ class TradingBot:
     def verify_stop_protection(self):
         """Detect positions whose broker-side stop vanished and re-arm it."""
         if not self.portfolio.positions:
+            self.stop_protection_blocks_entries = False
             return []
         try:
             reports = self.order_mgr.check_protection(
@@ -313,14 +352,29 @@ class TradingBot:
             self.notifier.alert_exception("verify_stop_protection", e)
             return []
 
+        at_risk = []
         for report in reports:
-            if report["rearmed"]:
+            if report.get("rearmed"):
                 logger.warning(f"🛡️ {report['symbol']} 已自動補掛停損")
-            else:
-                logger.error(
-                    f"🚨 {report['symbol']} 停損保護缺失且未補掛 "
-                    f"({report['status']})，請人工確認"
+                continue
+            if report["status"] in ("unprotected", "untracked"):
+                at_risk.append(report)
+                msg = (
+                    f"CRITICAL 裸倉：{report['symbol']} 停損缺失 ({report['status']})，"
+                    f"re-arm {'失敗' if report.get('rearm_failed') else '未執行'}"
                 )
+                logger.error(f"🚨 {msg}")
+                self.notifier.alert_risk_limit(msg)
+                self.blotter.log_event(
+                    "STOP_REARM_FAILED",
+                    symbol=report["symbol"],
+                    reason=msg,
+                    shares=report.get("quantity"),
+                    stop_price=report.get("stop_price") or "",
+                )
+
+        self.stop_protection_blocks_entries = len(at_risk) > 0
+        self.last_protection_check = time.time()
         return reports
 
     # ----- data (H7) -----
@@ -412,7 +466,7 @@ class TradingBot:
             exposure=self.exposure,
             allow_intraday_entries=self.allow_intraday_entries,
             current_regime=self.current_regime.regime if self.current_regime else "NEUTRAL",
-            allow_new_entries=self.allow_new_entries,
+            allow_new_entries=self._entries_permitted(),
             vix=self.current_vix,
             zscore_min=self.zscore_min,
             breadth_score=self.breadth_score,
@@ -629,6 +683,7 @@ class TradingBot:
                     self.current_vix = float(data["Close"].iloc[-1])
                     self.vix_failures = 0
                     self.vix_is_stale = False
+                    self.vix_blocks_entries = False
                     self.risk_mgr.check_vix(self.current_vix)
                     return self.current_vix
                 last_error = "空數據"
@@ -649,7 +704,13 @@ class TradingBot:
         logger.error(f"⚠️ {message}")
         self.blotter.log_event("VIX_STALE", reason=message)
         if self.vix_failures >= self.max_data_failures:
+            self.vix_blocks_entries = True
             self.notifier.alert_stale_data("^VIX", message)
+            self.blotter.log_event(
+                "VIX_BLOCK_ENTRIES",
+                reason=f"VIX stale {self.vix_failures} 次，暫停新倉",
+            )
+            logger.error("🚫 VIX 數據失效 — 已暫停新倉直至恢復")
         self.risk_mgr.check_vix(self.current_vix)
         return self.current_vix
 
@@ -743,7 +804,7 @@ class TradingBot:
                         try:
                             if not may_trade and not self.portfolio.has_position(symbol):
                                 continue
-                            if not self.allow_new_entries and not self.portfolio.has_position(symbol):
+                            if not self._entries_permitted() and not self.portfolio.has_position(symbol):
                                 continue
                             if self.professional.strategic_cash_mode and not self.portfolio.has_position(symbol):
                                 continue

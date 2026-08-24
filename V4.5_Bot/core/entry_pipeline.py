@@ -1,11 +1,14 @@
 """Buy-entry pipeline — discrete, testable stages extracted from handle_buy()."""
 
+import logging
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from core.position_sizer import scale_shares
 from core.professional_mind import MindDecision
 from core.strategies.base import MarketContext
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -39,6 +42,7 @@ class EntryPipeline:
         auto_trade=False,
         ibkr=None,
         max_gross_pct_fn: Optional[Callable[[], float]] = None,
+        min_shares=1,
     ):
         self.risk_mgr = risk_mgr
         self.portfolio = portfolio
@@ -50,6 +54,7 @@ class EntryPipeline:
         self.max_shares = max_shares
         self.auto_trade = auto_trade
         self.ibkr = ibkr
+        self.min_shares = max(0, int(min_shares))
         self.max_gross_pct_fn = max_gross_pct_fn or (lambda: portfolio.max_gross_exposure_pct)
 
     def step_slippage(self, signal_entry):
@@ -93,27 +98,43 @@ class EntryPipeline:
         return shares
 
     def step_mind_approval(self, symbol, signal, df, entry, stop, shares, mind_ctx):
-        return self.professional.approve_entry(
-            symbol, signal, df, mind_ctx, self.portfolio, self.risk_mgr,
-            entry, stop, shares, is_day_trade=False,
-        )
+        if self.professional is None:
+            return MindDecision(approve=True, execution_score=10)
+        cfg = getattr(self.professional, "cfg", None) or {}
+        if not cfg.get("enabled", True):
+            return MindDecision(approve=True, execution_score=10)
+        try:
+            return self.professional.approve_entry(
+                symbol, signal, df, mind_ctx, self.portfolio, self.risk_mgr,
+                entry, stop, shares, is_day_trade=False,
+            )
+        except Exception as exc:
+            logger.warning(f"{symbol} mind evaluation failed: {exc}")
+            return MindDecision(
+                approve=False,
+                action="MIND_ERROR",
+                reasons=[f"mind evaluation error: {exc}"],
+            )
 
     def step_apply_mind_decision(self, mind_decision, stop, shares):
+        floor = self.min_shares
         if mind_decision.stop_override:
             stop = mind_decision.stop_override
         if mind_decision.shares_scale and mind_decision.shares_scale < 1.0:
-            shares = scale_shares(shares, mind_decision.shares_scale, min_shares=1)
+            shares = scale_shares(shares, mind_decision.shares_scale, min_shares=floor)
         if mind_decision.risk_multiplier < 1.0:
-            shares = scale_shares(shares, mind_decision.risk_multiplier, min_shares=1)
+            shares = scale_shares(shares, mind_decision.risk_multiplier, min_shares=floor)
         return stop, shares
 
     def step_conviction(self, mind_decision, shares):
+        if self.professional is None:
+            return shares, 1.0, None
         conviction = self.professional.conviction_factor(mind_decision.execution_score)
         if conviction <= 0:
             reason = f"共振不足 (exec {mind_decision.execution_score}/10)"
             return shares, conviction, reason
         if conviction < 1.0:
-            shares = scale_shares(shares, conviction, min_shares=1)
+            shares = scale_shares(shares, conviction, min_shares=self.min_shares)
         return shares, conviction, None
 
     def step_validate_pre_trade(self, symbol, shares, entry, stop):
@@ -175,6 +196,12 @@ class EntryPipeline:
                 proceed=False, stage=stage, reason=reason,
                 entry=entry, stop=stop, target=target,
                 intraday_check=intraday_check,
+            )
+
+        if not allow_new_entries:
+            return EntryResult(
+                proceed=False, stage="GATE", reason="新倉已暫停",
+                entry=entry, stop=stop, target=target, intraday_check=intraday_check,
             )
 
         shares = self.step_sizing(

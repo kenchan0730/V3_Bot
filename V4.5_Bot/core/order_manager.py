@@ -300,6 +300,7 @@ class OrderManager:
                 "status": status,
                 "stop_price": stop_price,
                 "rearmed": False,
+                "rearm_failed": False,
             }
 
             logger.error(
@@ -337,6 +338,10 @@ class OrderManager:
                             reason="自動補掛保護性停損",
                             shares=quantity, stop_price=stop_price,
                         )
+                else:
+                    report["rearm_failed"] = True
+            elif auto_rearm and not stop_price:
+                report["rearm_failed"] = True
 
             reports.append(report)
 

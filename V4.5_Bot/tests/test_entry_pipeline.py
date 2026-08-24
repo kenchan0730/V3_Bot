@@ -176,6 +176,10 @@ def test_run_proceeds_when_all_stages_pass(monkeypatch, pipeline):
 
 
 def test_run_stops_at_mind_rejection(monkeypatch, pipeline):
+    pipeline.professional = ProfessionalMind({
+        "enabled": True,
+        "log_every_deliberation": False,
+    })
     monkeypatch.setattr(
         pipeline.professional,
         "approve_entry",
