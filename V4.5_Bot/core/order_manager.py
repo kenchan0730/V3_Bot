@@ -154,6 +154,7 @@ class OrderManager:
             return 0
         trades = self.ibkr.get_open_orders()
         added = 0
+        entries_to_sync = []
         for trade in trades or []:
             order = getattr(trade, "order", None)
             contract = getattr(trade, "contract", None)
@@ -196,6 +197,10 @@ class OrderManager:
             managed.status = status
             managed.filled_qty = filled
             added += 1
+            if role == "entry" and filled > 0:
+                entries_to_sync.append(managed)
+        for entry in entries_to_sync:
+            self._sync_bracket_children(entry)
         if added:
             logger.info(f"已從 broker 恢復 {added} 筆掛單追蹤")
         return added
@@ -216,9 +221,15 @@ class OrderManager:
                 continue
 
             old_qty = managed.quantity
-            managed.quantity = float(filled_qty)
             if self.ibkr and managed.trade is not None:
-                self.ibkr.modify_order_quantity(managed.trade, filled_qty)
+                if not self.ibkr.modify_order_quantity(managed.trade, filled_qty):
+                    logger.error(
+                        f"❌ {managed.symbol} {managed.role} 數量同步失敗 "
+                        f"（broker 仍為 {old_qty:.0f}，成交 {filled_qty}）"
+                    )
+                    continue
+
+            managed.quantity = float(filled_qty)
             updates.append({
                 "order_id": managed.order_id,
                 "symbol": managed.symbol,

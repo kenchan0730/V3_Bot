@@ -316,6 +316,33 @@ def test_hydrate_from_broker():
     assert manager.orders[101].stop == 11.0
 
 
+def test_hydrate_syncs_partial_entry_children():
+    class PartialHydrateIBKR:
+        def get_open_orders(self):
+            parent = make_trade("AVAH", status="Submitted", filled=3)
+            parent.order.orderId = 100
+            parent.order.parentId = 0
+            parent.order.orderType = "LMT"
+            parent.order.lmtPrice = 12.0
+            parent.orderStatus.filled = 3
+
+            stop = make_trade("AVAH", status="Submitted", filled=0)
+            stop.order.orderId = 101
+            stop.order.action = "SELL"
+            stop.order.parentId = 100
+            stop.order.orderType = "STP"
+            stop.order.auxPrice = 11.0
+            stop.order.totalQuantity = 5
+
+            return [parent, stop]
+
+    ibkr = PartialHydrateIBKR()
+    ibkr.modify_order_quantity = lambda trade, qty: True
+    manager = OrderManager(ibkr=ibkr)
+    manager.hydrate_from_broker()
+    assert manager.orders[101].quantity == 3
+
+
 class ModifyIBKR(HydrateIBKR):
     def __init__(self):
         self.modified = []

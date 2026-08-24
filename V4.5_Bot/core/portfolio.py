@@ -66,8 +66,6 @@ class Portfolio:
                 "market_value": abs(quantity) * price,
                 "stop": existing_stop,
             }
-        for symbol in set(self.intended_stops) - set(merged):
-            self.intended_stops.pop(symbol, None)
         self.positions = merged
         return self.positions
 

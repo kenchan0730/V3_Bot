@@ -507,6 +507,7 @@ class TradingBot:
             self.notifier.alert_order_issue(symbol, "平倉下單失敗")
             self.blotter.log_rejection(symbol, "平倉失敗", stage="EXECUTION")
             return
+        self.portfolio.clear_stop(symbol)
         self.blotter.log_order(
             symbol, "SELL", quantity, getattr(getattr(trade, "order", None), "orderId", None),
             price, None, None, reason=f"STRONG_SELL (取消 {cancelled} 筆掛單)",
