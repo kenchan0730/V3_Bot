@@ -126,10 +126,16 @@ class EntryPipeline:
             shares = scale_shares(shares, mind_decision.risk_multiplier, min_shares=floor)
         return stop, shares
 
-    def step_conviction(self, mind_decision, shares):
+    def step_conviction(self, mind_decision, shares, signal=None):
         if self.professional is None:
             return shares, 1.0, None
         conviction = self.professional.conviction_factor(mind_decision.execution_score)
+        track = (signal or {}).get("track", "STRONG")
+        moderate_cap = float(
+            getattr(self, "moderate_size_factor", 0.5)
+        )
+        if track == "MODERATE":
+            conviction = min(conviction, moderate_cap)
         if conviction <= 0:
             reason = f"共振不足 (exec {mind_decision.execution_score}/10)"
             return shares, conviction, reason
@@ -227,7 +233,9 @@ class EntryPipeline:
             )
 
         stop, shares = self.step_apply_mind_decision(mind_decision, stop, shares)
-        shares, conviction, conviction_reason = self.step_conviction(mind_decision, shares)
+        shares, conviction, conviction_reason = self.step_conviction(
+            mind_decision, shares, signal=signal,
+        )
         if conviction_reason:
             return EntryResult(
                 proceed=False, stage="CONVICTION", reason=conviction_reason,

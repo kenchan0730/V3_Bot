@@ -13,6 +13,7 @@ from core.portfolio import Portfolio
 from core.quant_engine import QuantEngine
 from core.risk_manager import RiskManager
 from core.strategies import MarketContext, load_strategies
+from core.swing_filters import SwingQualityFilter
 from core.trading_state import TradingState
 
 logger = logging.getLogger(__name__)
@@ -124,6 +125,8 @@ class BacktestEngine:
         self.professional = professional_mind
         self.mind_rejections = 0
         self._disabled_intraday = IntradayEngine({"enabled": False})
+        self.swing_filter = SwingQualityFilter(self.config.get("swing_trading", {}))
+        self.breadth_score = 50.0
 
     def entry_with_slippage(self, price):
         """Mirror ``TradingBot.entry_with_slippage`` so fills are comparable."""
@@ -171,8 +174,12 @@ class BacktestEngine:
             state=state,
         )
         portfolio = Portfolio(self.config.get("portfolio", {}))
+        self.swing_filter.portfolio = portfolio
         risk_mgr.set_concentration_cap(portfolio.max_symbol_pct)
         pipeline = self._build_entry_pipeline(risk_mgr, portfolio)
+        pipeline.moderate_size_factor = float(
+            (self.config.get("swing_trading", {}) or {}).get("moderate_size_factor", 0.5)
+        )
         open_trade = None
 
         for index in range(self.warmup_bars, len(df)):
@@ -218,6 +225,7 @@ class BacktestEngine:
             context = MarketContext(
                 symbol=symbol, price=price, vix=vix, zscore_min=self.zscore_min,
                 quant=quant, vol_ratio=vol_ratio, ma20=ma20, ma50=ma50,
+                breadth_score=self.breadth_score,
             )
 
             for strategy in self.strategies:
@@ -225,7 +233,11 @@ class BacktestEngine:
                 if not ok:
                     continue
                 signal = strategy.generate_signal(window, context)
-                if signal.get("action") != "STRONG_BUY":
+                if signal.get("action") not in ("STRONG_BUY", "MODERATE_BUY"):
+                    continue
+
+                quality_ok, _ = self.swing_filter.validate(symbol, signal, context, df=window)
+                if not quality_ok:
                     continue
 
                 entry_result = pipeline.run(

@@ -33,6 +33,7 @@ from core.portfolio import Portfolio
 from core.professional_mind import ProfessionalMind
 from core.quant_engine import QuantEngine
 from core.realtime_pulse import RealtimePulse
+from core.swing_filters import SwingQualityFilter
 from core.regime import CRISIS, RegimeDetector
 from core.risk_manager import RiskManager
 from core.sector_tracker import SectorTracker
@@ -103,6 +104,10 @@ class TradingBot:
         self.risk_mgr.set_concentration_cap(self.portfolio.max_symbol_pct)
         self.fundamental = FundamentalFilter(config.get("fundamental", {}))
         self.news = NewsSentiment(config.get("news", {}))
+        self.swing_filter = SwingQualityFilter(
+            config.get("swing_trading", {}),
+            portfolio=self.portfolio,
+        )
         self.realtime_pulse = RealtimePulse(
             config.get("market_data", {}),
             ibkr=None,
@@ -143,6 +148,8 @@ class TradingBot:
             ibkr=self.ibkr,
             max_gross_pct_fn=self._effective_gross_cap,
         )
+        swing_cfg = config.get("swing_trading", {}) or {}
+        self.entry_pipeline.moderate_size_factor = float(swing_cfg.get("moderate_size_factor", 0.5))
         self.cycle_mind = None
         self.current_regime = None
         self.allow_new_entries = True
@@ -299,6 +306,11 @@ class TradingBot:
 
         self.exposure = self._apply_sector_exposure(exposure)
         logger.info(f"📉 建議曝險: {self.exposure}% | Z-Score 下限: {self.zscore_min}")
+        try:
+            self.swing_filter.refresh_sector_context(force=True)
+            logger.info(f"🏭 {self.swing_filter.market_summary()}")
+        except Exception as exc:
+            logger.warning(f"板塊輪動更新失敗: {exc}")
 
     def refresh_watchlist_if_due(self, force=False):
         try:
@@ -669,11 +681,19 @@ class TradingBot:
             self.blotter.log_signal(symbol, signal, quant, vol_ratio, self.exposure)
 
             action = signal.get("action")
-            if action == "STRONG_BUY":
+            if action in ("STRONG_BUY", "MODERATE_BUY"):
                 if not can_trade:
                     logger.warning(f"   {emo_msg}")
                     self.blotter.log_rejection(symbol, emo_msg, stage="EMOTION")
                     continue
+                quality_ok, quality_msg = self.swing_filter.validate(
+                    symbol, signal, context, df=df,
+                )
+                if not quality_ok:
+                    logger.info(f"   ⏳ 品質過濾: {quality_msg}")
+                    self.blotter.log_rejection(symbol, quality_msg, stage="SWING_QUALITY")
+                    continue
+                logger.info(f"   ✅ {quality_msg}")
                 self.handle_buy(symbol, signal, quant, vol_ratio, df=df)
                 return True
             elif action == "STRONG_SELL":

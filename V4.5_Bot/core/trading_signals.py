@@ -33,13 +33,21 @@ def _label(confidence):
 def evaluate_edges(price, vix, z_score, vol_ratio, ma20, ma50, candle,
                    zscore_min=0.5, min_candle_strength=0.4,
                    min_vol_ratio_high=1.5, max_vol_ratio_low=0.8,
-                   require_trend=True):
-    """Score each edge as passed (mandatory) and/or strongly confirmed (bonus)."""
+                   trend_mode="full", zscore_max=1.5):
+    """Score each edge as passed (mandatory) and/or strongly confirmed (bonus).
+
+    trend_mode: full (price>MA20>MA50) | swing (price>MA50) | off (always pass)
+    """
     strength = candle.get("strength", 0) or 0
-    trend_passed = price > ma20 > ma50 if require_trend else True
+    if trend_mode == "off":
+        trend_passed = True
+    elif trend_mode == "swing":
+        trend_passed = bool(ma50) and price > ma50
+    else:
+        trend_passed = price > ma20 > ma50
     edges = {
         "zscore": {
-            "passed": zscore_min <= z_score <= 1.5,
+            "passed": zscore_min <= z_score <= zscore_max,
             "strong": ZSCORE_SWEET_SPOT[0] <= z_score <= ZSCORE_SWEET_SPOT[1],
         },
         "trend": {
@@ -85,10 +93,22 @@ class TradingSignals:
     def get_combined_signal(df, price, vix, z_score, vol_ratio, ma20, ma50,
                             zscore_min=0.5, min_candle_strength=0.4,
                             min_vol_ratio_high=1.5, max_vol_ratio_low=0.8,
-                            require_trend=True,
+                            trend_mode="full", zscore_max=1.5,
+                            moderate_enabled=True, moderate_min_edges=4,
+                            moderate_min_confluence=5,
                             symbol=None, candle_config=None):
         df = normalize_columns(df)
         candle = CandlePatterns.identify_all(df)
+        swing_cfg = (candle_config or {}).get("_swing") or {}
+        if swing_cfg:
+            moderate_enabled = bool(swing_cfg.get("moderate_buy_enabled", moderate_enabled))
+            moderate_min_edges = int(swing_cfg.get("moderate_min_edges", moderate_min_edges))
+            moderate_min_confluence = int(
+                swing_cfg.get("moderate_min_confluence", moderate_min_confluence)
+            )
+            trend_mode = swing_cfg.get("trend_mode", trend_mode)
+            zscore_max = float(swing_cfg.get("zscore_max", zscore_max))
+
         if symbol and candle_config:
             try:
                 from candle_lab.bridge import apply_learned_adjustment
@@ -102,19 +122,21 @@ class TradingSignals:
             price, vix, z_score, vol_ratio, ma20, ma50, candle,
             zscore_min=zscore_min, min_candle_strength=min_candle_strength,
             min_vol_ratio_high=min_vol_ratio_high, max_vol_ratio_low=max_vol_ratio_low,
-            require_trend=require_trend,
+            trend_mode=trend_mode, zscore_max=zscore_max,
         )
         confluence = confluence_from_edges(edges)
         edge_names = sorted(name for name, e in edges.items() if e["passed"])
         strong_names = sorted(name for name, e in edges.items() if e["strong"])
+        passed_count = sum(1 for e in edges.values() if e["passed"])
 
-        if all(e["passed"] for e in edges.values()):
+        def _buy_payload(action, track):
             entry = candle["entry"] or price + 0.01
             stop = candle["stop"] or price - (price * 0.02)
             risk = entry - stop
             confidence = confidence_from_edges(edges, strength)
             return {
-                "action": "STRONG_BUY",
+                "action": action,
+                "track": track,
                 "entry": round(entry, 2),
                 "stop": round(stop, 2),
                 "target1": round(entry + risk * 1.5, 2),
@@ -131,10 +153,22 @@ class TradingSignals:
                     "reason": candle.get("learned_reason"),
                 },
                 "reason": (
-                    f"K線信號: {', '.join(candle['patterns'])} + V4.0確認 "
-                    f"(共振 {confluence}/10, 強化 {len(strong_names)}/5)"
+                    f"K線: {', '.join(candle['patterns'])} ({track}) "
+                    f"共振 {confluence}/10, 強化 {len(strong_names)}/5"
                 ),
             }
+
+        if all(e["passed"] for e in edges.values()):
+            return _buy_payload("STRONG_BUY", "STRONG")
+
+        if (
+            moderate_enabled
+            and passed_count >= moderate_min_edges
+            and edges["candle"]["passed"]
+            and edges["zscore"]["passed"]
+            and confluence >= moderate_min_confluence
+        ):
+            return _buy_payload("MODERATE_BUY", "MODERATE")
 
         if candle["signal"] == "bearish" and strength <= -min_candle_strength:
             return {
