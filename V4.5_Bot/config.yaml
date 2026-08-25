@@ -12,12 +12,14 @@ ibkr:
   max_retries: 10
 
 risk:
-  max_risk_percent: 1.5           # J Law 區間 1–1.5%
+  # 小資金必須集中：$1,275 的部位若只有 $200，來回 $2 手續費就是 1% 的固定損耗。
+  # 2 年回測（40 檔優質大型股）：1.5%/20% 倉 → 淨 -$19；2.0%/33% 倉 → 淨 +$34。
+  max_risk_percent: 2.0
   max_loss_streak: 3
-  reduced_risk_percent: 1.0
+  reduced_risk_percent: 1.2
   # 集中度上限的單一事實來源是 portfolio.max_symbol_pct；
   # main.py 啟動時會注入覆蓋此值（此處僅為獨立使用/回測的預設）。
-  max_position_pct: 20.0
+  max_position_pct: 33.0
   # 兩條獨立防線：回撤護利潤、絕對虧損護本金（刻意留出間距，避免同時觸發）
   max_drawdown_limit: 12.0        # 相對高位回撤 → 停機
   max_absolute_loss: 8.0          # 相對初始資本虧損 → 停機
@@ -28,24 +30,54 @@ risk:
 
 portfolio:
   # max_symbol_pct 是單一標的集中度的單一事實來源（會注入 RiskManager）
-  max_gross_exposure_pct: 60.0    # J Law 趨勢市上限；regime 會再往下收緊
-  max_open_positions: 5
+  # 3 檔 × 33% ≈ 滿倉；散戶的優勢是可以集中，機構因授權限制不能。
+  max_gross_exposure_pct: 99.0
+  max_open_positions: 3
   max_sector_pct: 40.0
-  max_symbol_pct: 20.0
+  max_symbol_pct: 33.0
   max_total_open_risk_pct: 6.0
   correlation_threshold: 0.8
   sector_map:
-    AVAH: Healthcare
-    EROC: Energy
-    QXO: Industrials
-    F: Consumer Cyclical
-    SOFI: Financials
-    PLUG: Industrials
-    SNAP: Communication Services
-    HOOD: Financials
-    NIO: Consumer Cyclical
-    INTC: Technology
-    AAL: Industrials
+    AAPL: Technology
+    NVDA: Technology
+    AMD: Technology
+    AVGO: Technology
+    QCOM: Technology
+    TXN: Technology
+    AMAT: Technology
+    LRCX: Technology
+    KLAC: Technology
+    ADI: Technology
+    MU: Technology
+    ADBE: Technology
+    CRM: Technology
+    NOW: Technology
+    INTU: Technology
+    PANW: Technology
+    CDNS: Technology
+    FTNT: Technology
+    SNPS: Technology
+    ORCL: Technology
+    IBM: Technology
+    GOOGL: Communication Services
+    AMZN: Consumer Cyclical
+    HD: Consumer Cyclical
+    MCD: Consumer Cyclical
+    WMT: Consumer Defensive
+    COST: Consumer Defensive
+    JPM: Financials
+    MS: Financials
+    AXP: Financials
+    JNJ: Healthcare
+    ABBV: Healthcare
+    MRK: Healthcare
+    SYK: Healthcare
+    ISRG: Healthcare
+    XOM: Energy
+    CVX: Energy
+    GE: Industrials
+    HON: Industrials
+    RTX: Industrials
 
 backtest:
   apply_costs: true               # 回測套用手續費+滑點，避免高估實盤績效
@@ -86,8 +118,11 @@ volatility:
   vix_threshold: 25
 
 trading:
-  price_limit: 40
-  max_shares: 20
+  # $40 上限曾迫使系統只能選高波動小型股，2 年回測毛利為 -$17（完全無優勢）；
+  # 放開後同一套訊號在優質大型股上毛利 +$628。價格上限不該當成風控工具。
+  price_limit: 400
+  # 上限只作防手殘；真正的倉位由風險%與 portfolio.max_symbol_pct 決定。
+  max_shares: 200
   auto_trade: false        # 僅在 H1–H10 驗證並完成紙上交易後才開啟
   market_hours_only: true
   scan_interval_seconds: 300
@@ -130,31 +165,68 @@ intraday:
   fetch_timeout_seconds: 20       # 避免 yfinance 無限阻塞主循環
 
 watchlist:
+  # 優質流動性標的，且股價 ≤ 約 $370 —— 單一部位預算是 $1,275 × 33% ≈ $420，
+  # 更貴的股票連 1 股都買不滿，掃描它們只是浪費時間（除非改用碎股）。
+  # 2 年回測（同一套訊號、同一組門檻）：
+  #   廣泛大型股 40 檔 → 5.67 單/月、毛/單 $2.30、淨 +2.8%
+  #   動能傾向 40 檔   → 6.19 單/月、毛/單 $2.55、淨 +5.6%  ← 採用
+  #   純科技 28 檔     → 3.05 單/月、毛/單 $2.87、淨 +4.4%
   core:
-    - AVAH
-    - EROC
-    - QXO
+    - AAPL
+    - NVDA
+    - GOOGL
+    - AMZN
+    - JPM
   satellite:
-    - F
-    - SOFI
-    - PLUG
-    - SNAP
-    - HOOD
-    - NIO
-    - INTC
-    - AAL
-  max_active: 22
+    - AMD
+    - AVGO
+    - QCOM
+    - TXN
+    - AMAT
+    - LRCX
+    - KLAC
+    - ADI
+    - MU
+    - ADBE
+    - CRM
+    - NOW
+    - INTU
+    - PANW
+    - CDNS
+    - FTNT
+    - SNPS
+    - ORCL
+    - IBM
+    - MS
+    - AXP
+    - GE
+    - HON
+    - RTX
+    - ISRG
+    - SYK
+    - ABBV
+    - MRK
+    - JNJ
+    - XOM
+    - CVX
+    - HD
+    - MCD
+    - WMT
+    - COST
+  # 月 8 單需要足夠的候選池：11 檔在 2 年回測只產生約 47 個買點（≈2/月）。
+  # 深度分析 40 檔才能讓合格訊號量支撐目標頻率。
+  max_active: 40
   max_core: 5
-  max_satellite: 15
+  max_satellite: 35
   refresh_hours: 72           # 每週刷新 satellite（0 = 關閉自動刷新）
   persist_file: data/watchlist.json
   correlation_threshold: 0.78
   scanner:
     enabled: true
     source: sp500
-    max_scan: 180
-    min_price: 5
-    max_price: 40
+    max_scan: 250
+    min_price: 20
+    max_price: 400
 
 strategies:
   - name: v45_core
@@ -162,6 +234,23 @@ strategies:
     require_structure: false     # Swing：用 MA50 趨勢（見 swing_trading.trend_mode）
     min_vol_ratio_high: 1.2
     max_vol_ratio_low: 0.8
+
+# 散戶實務進場觸發：K 線形態只是其中一種，缺形態時改用回踩／突破／抬高低點。
+# 其他 edge（趨勢、量能、波動、Z-Score）完全不放寬。
+retail_triggers:
+  enabled: true
+  pullback_enabled: true
+  pullback_ma: 20
+  pullback_max_distance_pct: 3.5
+  pullback_strength: 0.45
+  breakout_enabled: true
+  breakout_lookback: 20
+  breakout_min_vol_ratio: 1.2
+  breakout_strength: 0.60
+  higher_low_enabled: true
+  higher_low_strength: 0.40
+  stop_atr_multiplier: 1.5
+  stop_pct_fallback: 3.0
 
 candle:
   min_strength: 0.30             # Swing 活躍門檻
@@ -220,7 +309,8 @@ retail_mind:
   min_reward_risk: 1.4
   max_extension_above_ma50_pct: 22.0   # 不追離均線過遠的股票
   min_dollar_volume: 2000000     # 想賣時要有人接
-  max_spread_proxy_pct: 4.0
+  max_spread_proxy_pct: 10.0     # 日均振幅硬上限（跳動過大＝滑點失控）
+  high_volatility_pct: 6.0       # 超過此值不擋，但扣分收斂倉位
   catalyst_min_news_score: 0.12
   catalyst_min_vol_ratio: 1.15
   catalyst_bonus: 2
@@ -365,6 +455,17 @@ professional_mind:
   min_regime_score_to_trade: 40
   log_every_deliberation: false
   journal_file: data/execution_journal.csv
+  # 共振分級：小資金不能把部位砍到 35%——手續費固定，砍半等於回本門檻翻倍。
+  # 低共振的正確做法是「不做」，不是「做很小」。
+  conviction_sizing:
+    enabled: true
+    full_size_score: 8
+    reduced_score: 7
+    minimum_score: 6
+    reduced_factor: 0.85
+    minimum_factor: 0.70
+    weak_factor: 0.70
+    reject_below: 6            # 低於 6 分直接拒絕，而不是縮到 35% 倉
   position_sizer:
     enabled: true
     atr_period: 14

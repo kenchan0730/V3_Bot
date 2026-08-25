@@ -204,3 +204,61 @@ def test_run_stops_at_pre_trade_validation(monkeypatch, pipeline):
     assert result.proceed is False
     assert result.stage == "PRE_TRADE"
     assert result.reason == "gross exposure cap"
+
+
+# ----- stop override must not silently destroy the R multiple -----
+
+def test_rescale_target_preserves_r_multiple():
+    # 1.5R trade whose stop is widened from -1.00 to -2.00 keeps 1.5R.
+    assert EntryPipeline.rescale_target(10.0, 9.0, 11.5, 8.0) == pytest.approx(13.0)
+
+
+def test_rescale_target_is_a_no_op_without_a_change():
+    assert EntryPipeline.rescale_target(10.0, 9.0, 11.5, 9.0) == 11.5
+    assert EntryPipeline.rescale_target(10.0, 9.0, None, 8.0) is None
+    assert EntryPipeline.rescale_target(10.0, 10.0, 11.5, 8.0) == 11.5
+
+
+def test_run_rescales_target_after_atr_stop_override(monkeypatch, pipeline):
+    pipeline.professional.cfg["enabled"] = True
+    monkeypatch.setattr(
+        pipeline.professional,
+        "approve_entry",
+        lambda *a, **k: MindDecision(approve=True, execution_score=9, stop_override=8.0),
+    )
+    signal = {"entry": 10.0, "stop": 9.0, "target1": 11.5, "action": "STRONG_BUY"}
+    result = pipeline.run("AVAH", signal, quant={}, df=make_ohlcv([10.0] * 80))
+    assert result.stop == 8.0
+    # Original geometry was 1.5R; a 2.00 stop distance must target 13.01.
+    assert result.target == pytest.approx(result.entry + (result.entry - 8.0) * 1.5, abs=0.05)
+
+
+# ----- an uneconomic position is skipped, not taken small -----
+
+def test_min_notional_blocks_a_position_too_small_to_pay_its_commission():
+    pipe = EntryPipeline(
+        RiskManager(initial_capital=1000.0, config={"max_risk_percent": 2.0}),
+        _FakePortfolio(),
+        ProfessionalMind({"enabled": False, "log_every_deliberation": False}),
+        _FakeIntraday(),
+        price_limit=40.0,
+        max_shares=20,
+        min_notional=500.0,
+    )
+    ok, reason = pipe.step_validate_pre_trade("AVAH", 10, 10.0, 9.0)
+    assert ok is False
+    assert "最低經濟規模" in reason
+
+
+def test_min_notional_allows_a_full_size_position():
+    pipe = EntryPipeline(
+        RiskManager(initial_capital=1000.0, config={"max_risk_percent": 2.0}),
+        _FakePortfolio(),
+        ProfessionalMind({"enabled": False, "log_every_deliberation": False}),
+        _FakeIntraday(),
+        price_limit=40.0,
+        max_shares=100,
+        min_notional=200.0,
+    )
+    ok, reason = pipe.step_validate_pre_trade("AVAH", 30, 10.0, 9.0)
+    assert ok is True and reason == "OK"

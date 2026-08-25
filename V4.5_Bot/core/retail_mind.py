@@ -60,9 +60,11 @@ class RetailMind:
         # Setup geometry
         "min_reward_risk": 1.4,
         "max_extension_above_ma50_pct": 22.0,
-        # Tradability
+        # Tradability. Daily range is volatility, not spread — a liquid name can
+        # swing 6% and still fill cleanly, so it costs size rather than a veto.
         "min_dollar_volume": 2_000_000,
-        "max_spread_proxy_pct": 4.0,
+        "max_spread_proxy_pct": 10.0,
+        "high_volatility_pct": 6.0,
         # Catalysts are the retail edge: a live story beats a clean chart
         "catalyst_min_news_score": 0.12,
         "catalyst_min_vol_ratio": 1.15,
@@ -110,6 +112,20 @@ class RetailMind:
         if notional <= 0:
             return 999.0
         return self.round_trip_cost(shares, entry) / notional * 100.0
+
+    def min_viable_notional(self) -> float:
+        """Smallest position where round-trip cost stays inside the drag limit.
+
+        Below this, taking the trade at a reduced size is worse than skipping
+        it: the commission minimum is fixed, so halving the position doubles the
+        move needed just to break even.
+        """
+        max_drag = float(self.cfg["max_cost_drag_pct"]) / 100.0
+        slip = float(self.cfg["slippage_pct"]) / 100.0 * 2
+        headroom = max_drag - slip
+        if headroom <= 0:
+            return 0.0
+        return round(float(self.cfg["commission_minimum"]) * 2 / headroom, 2)
 
     def affordable_shares(self, entry, capital, max_shares=None, max_symbol_pct=100.0):
         """Largest share count the account can actually pay for."""
@@ -266,7 +282,7 @@ class RetailMind:
         if spread is not None and spread > max_spread:
             return self._reject(
                 verdict, metrics,
-                f"日內振幅 {spread:.1f}% > {max_spread:.1f}%（買賣價差與跳動太大）",
+                f"日內振幅 {spread:.1f}% > {max_spread:.1f}%（跳動過大，難以控制滑點）",
             )
 
         if tier == "D":
@@ -322,6 +338,11 @@ class RetailMind:
         if extension is not None and extension <= max_ext / 2:
             score += 1
             reasons.append(f"距 MA50 +{extension:.1f}%，位置不追高")
+
+        high_vol = float(self.cfg["high_volatility_pct"])
+        if spread is not None and spread > high_vol:
+            score -= 1
+            thoughts.append(f"日均振幅 {spread:.1f}%，波動偏大 → 倉位收斂")
 
         confluence = int(signal.get("confluence_score") or 0)
         if confluence >= 6:

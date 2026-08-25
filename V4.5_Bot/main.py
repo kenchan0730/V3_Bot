@@ -161,6 +161,7 @@ class TradingBot:
             auto_trade=self.auto_trade,
             ibkr=self.ibkr,
             max_gross_pct_fn=self._effective_gross_cap,
+            min_notional=self.retail_mind.min_viable_notional(),
         )
         swing_cfg = config.get("swing_trading", {}) or {}
         self.entry_pipeline.moderate_size_factor = float(swing_cfg.get("moderate_size_factor", 0.5))

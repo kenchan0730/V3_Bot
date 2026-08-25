@@ -43,6 +43,7 @@ class EntryPipeline:
         ibkr=None,
         max_gross_pct_fn: Optional[Callable[[], float]] = None,
         min_shares=1,
+        min_notional=0.0,
     ):
         self.risk_mgr = risk_mgr
         self.portfolio = portfolio
@@ -55,6 +56,7 @@ class EntryPipeline:
         self.auto_trade = auto_trade
         self.ibkr = ibkr
         self.min_shares = max(0, int(min_shares))
+        self.min_notional = max(0.0, float(min_notional))
         self.max_gross_pct_fn = max_gross_pct_fn or (lambda: portfolio.max_gross_exposure_pct)
 
     def step_slippage(self, signal_entry):
@@ -126,6 +128,23 @@ class EntryPipeline:
             shares = scale_shares(shares, mind_decision.risk_multiplier, min_shares=floor)
         return stop, shares
 
+    @staticmethod
+    def rescale_target(entry, original_stop, original_target, new_stop):
+        """Keep the intended R multiple after a stop override.
+
+        An ATR stop is often wider than the trigger's stop. Leaving the target
+        where it was silently converts a 1.5R trade into a sub-1R one, which is
+        how a disciplined stop rule ends up destroying expectancy.
+        """
+        if not original_target or not original_stop:
+            return original_target
+        original_risk = entry - original_stop
+        new_risk = entry - new_stop
+        if original_risk <= 0 or new_risk <= 0 or new_risk == original_risk:
+            return original_target
+        r_multiple = (original_target - entry) / original_risk
+        return round(entry + new_risk * r_multiple, 2)
+
     def step_conviction(self, mind_decision, shares, signal=None):
         if self.professional is None:
             return shares, 1.0, None
@@ -157,6 +176,11 @@ class EntryPipeline:
             return False, "進場價必須高於停損價"
 
         cost = shares * entry
+        if self.min_notional and cost < self.min_notional:
+            return False, (
+                f"部位 ${cost:.0f} < 最低經濟規模 ${self.min_notional:.0f}"
+                "（縮到這麼小，手續費會吃掉優勢，寧可不做）"
+            )
         stop_risk = (entry - stop) * shares
         allowed, reason = self.portfolio.can_open(
             symbol, cost, self.risk_mgr.total_capital, stop_risk,
@@ -235,7 +259,9 @@ class EntryPipeline:
                 mind_decision=mind_decision, intraday_check=intraday_check,
             )
 
+        original_stop = stop
         stop, shares = self.step_apply_mind_decision(mind_decision, stop, shares)
+        target = self.rescale_target(entry, original_stop, target, stop)
         shares, conviction, conviction_reason = self.step_conviction(
             mind_decision, shares, signal=signal,
         )

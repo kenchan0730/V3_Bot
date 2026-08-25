@@ -157,9 +157,9 @@ class BacktestEngine:
         pacing_cfg["state_file"] = None
         if pacing_target is not None:
             pacing_cfg["target_trades_per_month"] = pacing_target
-            pacing_cfg["max_trades_per_month"] = max(
-                1, int(round(float(pacing_target) * 1.5))
-            )
+            # The portfolio-level hard cap cannot be modelled per symbol, so it
+            # is lifted here; only the relax/tighten behaviour is replayed.
+            pacing_cfg["max_trades_per_month"] = 10_000
         self.use_pacing = bool(costs.get("use_pacing", True))
         self.pacing_cfg = pacing_cfg
         self.max_symbol_pct = float(
@@ -199,6 +199,9 @@ class BacktestEngine:
             auto_trade=False,
             min_shares=0,
             max_gross_pct_fn=lambda: gross_cap,
+            min_notional=(
+                self.retail_mind.min_viable_notional() if self.use_retail_mind else 0.0
+            ),
         )
 
     def _base_thresholds(self):

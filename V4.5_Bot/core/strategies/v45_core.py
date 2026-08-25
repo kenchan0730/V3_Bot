@@ -81,4 +81,7 @@ class V45CoreStrategy(BaseStrategy):
             moderate_min_confluence=int(swing_cfg.get("moderate_min_confluence", 5)),
             symbol=context.symbol,
             candle_config=candle_cfg,
+            trigger_config=(
+                (self.config.get("_root_triggers") or {}) if isinstance(self.config, dict) else {}
+            ),
         )

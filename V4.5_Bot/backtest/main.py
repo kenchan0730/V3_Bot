@@ -5,11 +5,13 @@ import json
 import logging
 import sys
 
+import pandas as pd
 import yfinance as yf
 
 from backtest.engine import BacktestEngine
 from core.config_loader import load_config
 from core.correlation import clustered_pairs, correlation_matrix
+from core.data_utils import normalize_columns
 from core.professional_mind import ProfessionalMind
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s | %(message)s")
@@ -36,6 +38,17 @@ def build_mind(config):
     mind_cfg["log_every_deliberation"] = False
     mind_cfg["journal_file"] = "data/backtest_journal.csv"
     return ProfessionalMind(mind_cfg)
+
+
+def close_series(df):
+    """Close column as a 1-D Series, tolerating yfinance's MultiIndex columns."""
+    frame = normalize_columns(df)
+    if "close" not in frame.columns:
+        return None
+    series = frame["close"]
+    if isinstance(series, pd.DataFrame):
+        series = series.iloc[:, 0]
+    return series
 
 
 def watchlist_symbols(config):
@@ -91,7 +104,7 @@ def main(argv=None):
             continue
         result = engine.run(symbol, df)
         summaries[symbol] = result.summary()
-        closes[symbol] = result and df["Close"] if "Close" in df.columns else None
+        closes[symbol] = close_series(df)
 
         if not args.json:
             print(f"\n=== {symbol} ===")

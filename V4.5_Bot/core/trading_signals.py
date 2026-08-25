@@ -14,6 +14,7 @@ and a string here previously raised ``ValueError`` on every real buy signal.
 
 from core.candle_patterns import CandlePatterns
 from core.data_utils import normalize_columns
+from core.retail_triggers import detect as detect_retail_trigger
 
 ZSCORE_SWEET_SPOT = (0.8, 1.3)
 STRONG_VOL_RATIO = 2.0
@@ -96,7 +97,7 @@ class TradingSignals:
                             trend_mode="full", zscore_max=1.5,
                             moderate_enabled=True, moderate_min_edges=4,
                             moderate_min_confluence=5,
-                            symbol=None, candle_config=None):
+                            symbol=None, candle_config=None, trigger_config=None):
         df = normalize_columns(df)
         candle = CandlePatterns.identify_all(df)
         swing_cfg = (candle_config or {}).get("_swing") or {}
@@ -117,6 +118,30 @@ class TradingSignals:
                 import logging
                 logging.getLogger(__name__).warning(f"Candle Lab 调整跳过: {exc}")
         strength = candle.get("strength", 0) or 0
+
+        # A candlestick is one trigger among several. When none is present, fall
+        # back to the retail triggers (pullback / breakout / higher low) so a
+        # setup with every other edge aligned is not discarded.
+        candle_triggered = (
+            candle.get("signal") == "bullish" and strength >= min_candle_strength
+        )
+        retail_trigger = None
+        if not candle_triggered and not candle.get("learned_blocked"):
+            retail_trigger = detect_retail_trigger(
+                df, ma20=ma20, ma50=ma50, vol_ratio=vol_ratio, config=trigger_config,
+            )
+        if retail_trigger:
+            candle = {
+                **candle,
+                "signal": "bullish",
+                "strength": retail_trigger["strength"],
+                "entry": retail_trigger["entry"],
+                "stop": retail_trigger["stop"],
+                "patterns": [retail_trigger["detail"]],
+                "driver": retail_trigger["name"],
+                "trigger_source": retail_trigger["name"],
+            }
+            strength = retail_trigger["strength"]
 
         edges = evaluate_edges(
             price, vix, z_score, vol_ratio, ma20, ma50, candle,
@@ -147,13 +172,15 @@ class TradingSignals:
                 "edges": edge_names,
                 "strong_edges": strong_names,
                 "candle_driver": candle.get("driver"),
+                "trigger": candle.get("trigger_source") or "candle",
                 "learned_candle": {
                     "blocked": candle.get("learned_blocked", False),
                     "multiplier": candle.get("learned_multiplier"),
                     "reason": candle.get("learned_reason"),
                 },
                 "reason": (
-                    f"K線: {', '.join(candle['patterns'])} ({track}) "
+                    f"觸發[{candle.get('trigger_source') or 'candle'}]: "
+                    f"{', '.join(candle['patterns'])} ({track}) "
                     f"共振 {confluence}/10, 強化 {len(strong_names)}/5"
                 ),
             }

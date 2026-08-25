@@ -158,6 +158,27 @@ def test_breakeven_metric_is_reported():
     assert verdict.metrics["shares"] > 0
 
 
+def test_min_viable_notional_tracks_the_commission_floor():
+    mind = RetailMind({"commission_minimum": 1.0, "max_cost_drag_pct": 1.2, "slippage_pct": 0.1})
+    assert mind.min_viable_notional() == pytest.approx(200.0, rel=0.01)
+
+    cheaper = RetailMind({"commission_minimum": 0.0, "max_cost_drag_pct": 1.2, "slippage_pct": 0.1})
+    assert cheaper.min_viable_notional() == 0.0
+
+
+def test_high_volatility_costs_score_but_does_not_veto():
+    calm = RetailMind().evaluate(
+        "TEST", GOOD_SIGNAL, make_context(), df=make_df(spread_pct=2.0),
+        capital=5000.0, max_shares=50,
+    )
+    wild = RetailMind().evaluate(
+        "TEST", GOOD_SIGNAL, make_context(), df=make_df(spread_pct=8.0),
+        capital=5000.0, max_shares=50,
+    )
+    assert wild.retail_score < calm.retail_score
+    assert wild.metrics["spread_proxy_pct"] > 6.0
+
+
 def test_disabled_mind_approves_without_scoring():
     verdict = RetailMind({"enabled": False}).evaluate(
         "TEST", GOOD_SIGNAL, make_context(), df=make_df(), capital=0.0,
