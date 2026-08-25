@@ -16,7 +16,7 @@ class MarketContext:
     def __init__(self, symbol, price, vix=18.0, zscore_min=0.5, exposure=100,
                  breadth_score=None, quant=None, vol_ratio=None, ma20=None, ma50=None,
                  regime=None, regime_score=None, allow_new_entries=True,
-                 intraday=None):
+                 intraday=None, threshold_overrides=None):
         self.symbol = symbol
         self.price = price
         self.vix = vix
@@ -31,6 +31,8 @@ class MarketContext:
         self.regime_score = regime_score
         self.allow_new_entries = allow_new_entries
         self.intraday = intraday or {}
+        # Effective (pace-adjusted) soft thresholds; empty means "use config".
+        self.threshold_overrides = threshold_overrides or {}
 
 
 class BaseStrategy(ABC):

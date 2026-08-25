@@ -53,6 +53,8 @@ backtest:
   commission_minimum: 1.0
   exit_slippage_ticks: 1
   use_professional_mind: true     # 回測同樣走心態層審批鏈
+  use_retail_mind: true           # 回測同樣走散戶思維層
+  use_pacing: true                # 回測同樣套用月度節奏調節
 
 execution:
   use_bracket_orders: true
@@ -171,8 +173,78 @@ candle:
   learn_period: "6mo"
 
 emotion:
-  max_daily_trades: 2            # 配合月 4–5 單：每日最多 2 筆
+  max_daily_trades: 2            # 月 8 單 ≈ 每週 2 單，單日 2 筆已足夠
   max_loss_streak: 3
+
+# 月度交易節奏：落後目標才放寬「軟性」門檻，追上後自動收緊。
+# 風控上限（停損、曝險、集中度）永不受此影響。
+trade_pacing:
+  enabled: true
+  target_trades_per_month: 8
+  max_trades_per_month: 12       # 硬上限：達到即停止新倉
+  window_days: 30
+  tolerance_pct: 25.0            # ±25% 視為節奏正常
+  max_relax_level: 1.0
+  state_file: data/trade_pacing.json
+  relax_deltas:                  # 完全放寬時的位移，按落後程度線性縮放
+    strong_min_confluence: -1
+    moderate_min_confluence: -1
+    moderate_min_edges: -1
+    rsi_max: 4.0
+    reject_rsi_above: 2.0
+    zscore_max: 0.15
+    zscore_min: -0.10
+    min_candle_strength: -0.08
+    min_vol_ratio_high: -0.10
+    retail_min_score: -1
+  floors:                        # 放寬的地板，確保閘門不會失效
+    strong_min_confluence: 3
+    moderate_min_confluence: 3
+    moderate_min_edges: 3
+    zscore_min: 0.30
+    min_candle_strength: 0.20
+    min_vol_ratio_high: 1.0
+    retail_min_score: 4
+  ceilings:
+    rsi_max: 78.0
+    reject_rsi_above: 82.0
+    zscore_max: 1.80
+
+# 專業散戶視角：機構看規模與估值，散戶看催化劑、成本與可操作性。
+retail_mind:
+  enabled: true
+  min_retail_score: 5
+  watch_score_margin: 2
+  slippage_pct: 0.10
+  max_cost_drag_pct: 1.20        # 來回手續費+滑點佔倉位比重上限（回本門檻）
+  min_reward_risk: 1.4
+  max_extension_above_ma50_pct: 22.0   # 不追離均線過遠的股票
+  min_dollar_volume: 2000000     # 想賣時要有人接
+  max_spread_proxy_pct: 4.0
+  catalyst_min_news_score: 0.12
+  catalyst_min_vol_ratio: 1.15
+  catalyst_bonus: 2
+  require_catalyst: false
+  external_signal_bonus: 1
+  allow_unprofitable_growth: true
+  unprofitable_needs_catalyst: true
+  size_ladder:                   # 評分 → 倉位比例
+    - [9, 1.0]
+    - [7, 0.75]
+    - [6, 0.55]
+    - [5, 0.4]
+
+# 與外部金融 App 聯通：App 寫入 inbox，機械人審視後把結論寫回 verdicts。
+external_signals:
+  enabled: true
+  directory: data/external_signals
+  inbox_file: inbox.jsonl
+  verdict_file: verdicts.jsonl
+  processed_file: processed.json
+  max_per_cycle: 5
+  max_age_hours: 48
+  allowed_symbols: []            # 留空 = 接受任何標的
+  api_token: ${SIGNAL_API_TOKEN:-}   # scripts/signal_server.py 使用
 
 swing_trading:
   enabled: true
@@ -197,13 +269,20 @@ swing_trading:
   block_learned_losers: true
 
 fundamental:
+  # retail = 分級（A–D）而非一票否決；institutional = 原本的硬性門檻
+  mode: retail
   enabled: true
-  min_market_cap: 500000000
+  min_market_cap: 500000000     # retail 模式下僅作為 A/B 分級參考
   min_avg_volume: 1000000
   max_pe: 30
   min_earnings_growth: 10
-  exclude_negative_eps: true
+  exclude_negative_eps: true    # 僅 institutional 模式生效
   cache_ttl_seconds: 86400
+  retail:
+    min_market_cap: 150000000   # 低於此為微型股 → D 級硬擋
+    min_avg_volume: 400000      # 流動性不足 → D 級硬擋
+    extreme_pe: 80              # 高於此列 C 級（需催化劑）
+    allow_unprofitable: true    # 虧損成長股列 C 級，不直接排除
 
 sector:
   enabled: true
@@ -218,6 +297,14 @@ news:
   fail_mode: open          # open=無新聞放行 | closed=來源全失敗則阻擋
   block_on_negative: true
   max_headlines: 20
+  # 機構級消息稽核：外部 App 傳來的消息需經跨來源交叉驗證才影響決策
+  credibility:
+    enabled: true
+    min_token_overlap: 0.28
+    min_domains_for_verified: 2
+    min_confidence_for_verified: 0.65
+    min_confidence_for_partial: 0.40
+    max_age_hours: 72
   sources:
     - name: yahoo
       enabled: true

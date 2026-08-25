@@ -60,6 +60,13 @@ class SwingQualityFilter:
             return self.portfolio.sector_of(symbol)
         return "Unknown"
 
+    def _threshold(self, context, key, default):
+        """Config value, unless the pacer supplied an effective override."""
+        overrides = getattr(context, "threshold_overrides", None) or {}
+        if key in overrides:
+            return overrides[key]
+        return self.cfg.get(key, default)
+
     def validate(self, symbol, signal, context, df=None):
         """Return (ok, reason)."""
         if not self.cfg.get("enabled", True):
@@ -71,10 +78,10 @@ class SwingQualityFilter:
 
         track = signal.get("track") or ("STRONG" if action == "STRONG_BUY" else "MODERATE")
         confluence = int(signal.get("confluence_score") or 0)
-        min_conf = (
-            int(self.cfg["strong_min_confluence"])
+        min_conf = int(
+            self._threshold(context, "strong_min_confluence", 6)
             if track == "STRONG"
-            else int(self.cfg["moderate_min_confluence"])
+            else self._threshold(context, "moderate_min_confluence", 5)
         )
         if confluence < min_conf:
             return False, f"共振 {confluence}/10 < 門檻 {min_conf} ({track})"
@@ -83,11 +90,11 @@ class SwingQualityFilter:
         rsi = float(quant.get("rsi") or 50)
         z_score = float(quant.get("z_score") or 0)
 
-        reject_rsi = float(self.cfg.get("reject_rsi_above", 72))
+        reject_rsi = float(self._threshold(context, "reject_rsi_above", 72))
         if rsi > reject_rsi:
             return False, f"RSI {rsi:.1f} 超買 (> {reject_rsi})"
 
-        rsi_max = float(self.cfg.get("rsi_max", 68))
+        rsi_max = float(self._threshold(context, "rsi_max", 68))
         if rsi > rsi_max and track == "MODERATE":
             return False, f"RSI {rsi:.1f} 偏高，MODERATE 不做追價"
 
@@ -95,7 +102,7 @@ class SwingQualityFilter:
         if rsi < rsi_min and float(context.vol_ratio or 1) < 1.2:
             return False, f"RSI {rsi:.1f} 過低且量能不足（避免接刀）"
 
-        zmax = float(self.cfg.get("zscore_max", 1.45))
+        zmax = float(self._threshold(context, "zscore_max", 1.45))
         if z_score > zmax:
             return False, f"Z-Score {z_score:.2f} 過熱 (> {zmax})"
 

@@ -136,6 +136,9 @@ class EntryPipeline:
         )
         if track == "MODERATE":
             conviction = min(conviction, moderate_cap)
+        retail_cap = (signal or {}).get("retail_size_factor")
+        if retail_cap is not None:
+            conviction = min(conviction, float(retail_cap))
         if conviction <= 0:
             reason = f"共振不足 (exec {mind_decision.execution_score}/10)"
             return shares, conviction, reason

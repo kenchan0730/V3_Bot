@@ -6,6 +6,7 @@
 """
 
 import argparse
+import json
 import logging
 import os
 import signal
@@ -20,12 +21,14 @@ from core.config_loader import load_config
 from core.data_utils import normalize_columns, quality_report
 from core.entry_pipeline import EntryPipeline
 from core.emotion_manager import EmotionManager
+from core.external_signals import ExternalSignalInbox
 from core.fundamental_filter import FundamentalFilter
 from core.ibkr_connector import IBKRConnector
 from core.intraday_engine import IntradayEngine
 from core.logging_setup import configure_logging
 from core.market_breadth import MarketBreadth
 from core.market_data_sources import fetch_daily_bars
+from core.news_credibility import NewsCredibilityAuditor
 from core.news_sentiment import NewsSentiment
 from core.notifier import Notifier
 from core.order_manager import OrderManager
@@ -33,11 +36,14 @@ from core.portfolio import Portfolio
 from core.professional_mind import ProfessionalMind
 from core.quant_engine import QuantEngine
 from core.realtime_pulse import RealtimePulse
+from core.retail_mind import RetailMind
+from core.signal_reviewer import ExternalSignalReviewer, SymbolAnalysis
 from core.swing_filters import SwingQualityFilter
 from core.regime import CRISIS, RegimeDetector
 from core.risk_manager import RiskManager
 from core.sector_tracker import SectorTracker
 from core.strategies import MarketContext, load_strategies
+from core.trade_pacing import TradePacer
 from core.trading_state import TradingState
 from core.watchlist_manager import WatchlistManager
 
@@ -112,6 +118,14 @@ class TradingBot:
             config.get("market_data", {}),
             ibkr=None,
         )
+        self.retail_mind = RetailMind(self._build_retail_config(config))
+        self.pacer = TradePacer(config.get("trade_pacing", {}))
+        self.credibility = NewsCredibilityAuditor(
+            (config.get("news", {}) or {}).get("credibility", {})
+        )
+        self.external_inbox = ExternalSignalInbox(config.get("external_signals", {}))
+        self.threshold_overrides = {}
+        self.pace_status = None
         self.strategies = load_strategies(config)
 
         ibkr_cfg = config.get("ibkr", {}) or {}
@@ -150,6 +164,16 @@ class TradingBot:
         )
         swing_cfg = config.get("swing_trading", {}) or {}
         self.entry_pipeline.moderate_size_factor = float(swing_cfg.get("moderate_size_factor", 0.5))
+        self.reviewer = ExternalSignalReviewer(
+            analyzer=self.analyze_symbol,
+            credibility=self.credibility,
+            retail_mind=self.retail_mind,
+            news=self.news,
+            fundamental=self.fundamental,
+            capital_fn=lambda: self.risk_mgr.total_capital,
+            max_shares=self.max_shares,
+            max_symbol_pct=self.portfolio.max_symbol_pct,
+        )
         self.cycle_mind = None
         self.current_regime = None
         self.allow_new_entries = True
@@ -189,6 +213,15 @@ class TradingBot:
                 "live 模式需要明確確認：請在 data/.env 設定 LIVE_TRADING_CONFIRM=yes"
             )
         logger.warning("⚠️ LIVE TRADING MODE — port=7496 已確認，請再次核對 TWS 帳戶")
+
+    @staticmethod
+    def _build_retail_config(config):
+        """Retail mind inherits the same cost model the backtest charges."""
+        retail_cfg = dict(config.get("retail_mind", {}) or {})
+        costs = config.get("backtest", {}) or {}
+        retail_cfg.setdefault("commission_per_share", costs.get("commission_per_share", 0.005))
+        retail_cfg.setdefault("commission_minimum", costs.get("commission_minimum", 1.0))
+        return retail_cfg
 
     @staticmethod
     def _build_market_data_config(config):
@@ -564,6 +597,9 @@ class TradingBot:
         )
 
         if not self.auto_trade:
+            # Signal-only still counts toward pacing so the frequency target
+            # reflects what the strategy would have traded.
+            self.pacer.record_entry()
             self.blotter.log_event(
                 "SIGNAL_ONLY", symbol=symbol, reason="auto_trade 停用",
                 shares=shares, entry_price=entry, stop_price=stop, target_price=target,
@@ -586,6 +622,7 @@ class TradingBot:
             reason=signal.get("reason", ""),
         )
         self.emotion.record_trade(0)
+        self.pacer.record_entry()
 
     def handle_sell(self, symbol, signal, price):
         logger.info(f"   🔴 賣出信號: {signal.get('reason', '')}")
@@ -612,45 +649,89 @@ class TradingBot:
             price, None, None, reason=f"STRONG_SELL (取消 {cancelled} 筆掛單)",
         )
 
+    # ----- pacing -----
+
+    def refresh_pacing(self):
+        """Translate the rolling 30-day trade count into effective soft thresholds."""
+        swing_cfg = self.config.get("swing_trading", {}) or {}
+        candle_cfg = self.config.get("candle", {}) or {}
+        strat_cfg = (self.config.get("strategies") or [{}])[0] or {}
+        base = {
+            "strong_min_confluence": int(swing_cfg.get("strong_min_confluence", 4)),
+            "moderate_min_confluence": int(swing_cfg.get("moderate_min_confluence", 3)),
+            "moderate_min_edges": int(swing_cfg.get("moderate_min_edges", 3)),
+            "rsi_max": float(swing_cfg.get("rsi_max", 72)),
+            "reject_rsi_above": float(swing_cfg.get("reject_rsi_above", 78)),
+            "zscore_max": float(swing_cfg.get("zscore_max", 1.45)),
+            "zscore_min": float(self.zscore_min),
+            "min_candle_strength": float(candle_cfg.get("min_strength", 0.30)),
+            "min_vol_ratio_high": float(strat_cfg.get("min_vol_ratio_high", 1.2)),
+            "retail_min_score": int(self.retail_mind.cfg.get("min_retail_score", 5)),
+        }
+        effective, status = self.pacer.apply(base)
+        self.threshold_overrides = effective
+        self.pace_status = status
+        if status.relax_level:
+            logger.info(
+                f"🎚️ {status.summary()} → 共振 {effective['strong_min_confluence']}/"
+                f"{effective['moderate_min_confluence']}, RSI≤{effective['rsi_max']:.0f}, "
+                f"Z {effective['zscore_min']:.2f}–{effective['zscore_max']:.2f}, "
+                f"散戶分 ≥{effective['retail_min_score']}"
+            )
+        else:
+            logger.info(f"🎚️ {status.summary()}")
+        return status
+
     # ----- per-symbol pipeline -----
 
-    def process_symbol(self, symbol):
-        logger.info(f"\n🔍 分析: {symbol}")
+    def analyze_symbol(self, symbol) -> SymbolAnalysis:
+        """Read-only pipeline: fundamentals → news → data → signal → quality gate.
 
-        passed, reason = self.fundamental.filter(symbol)
-        if not passed:
-            logger.info(f"   ⏳ 基本面過濾: {reason}")
-            self.blotter.log_rejection(symbol, reason, stage="FUNDAMENTAL")
-            return
+        Shared by the live loop, ``--analyze`` and the external-signal reviewer so
+        all three see identical numbers.
+        """
+        analysis = SymbolAnalysis(symbol=symbol)
+
+        view = self.fundamental.assess(symbol)
+        analysis.fundamental_view = view.to_dict()
+        if not view.passed:
+            analysis.stage = "FUNDAMENTAL"
+            analysis.reason = view.reason
+            return analysis
 
         if getattr(self.news, "enabled", False):
             try:
+                analysis.news_view = self.news.get_sentiment(symbol)
                 news_ok, news_msg = self.news.is_sentiment_ok(symbol)
                 if not news_ok:
-                    logger.info(f"   ⏳ {news_msg}")
-                    self.blotter.log_rejection(symbol, news_msg, stage="NEWS")
-                    return
-                logger.info(f"   📰 {news_msg}")
-            except Exception as e:
-                logger.warning(f"新聞情緒檢查失敗 {symbol}: {e}")
+                    analysis.stage = "NEWS"
+                    analysis.reason = news_msg
+                    return analysis
+                analysis.reason = news_msg
+            except Exception as exc:
+                logger.warning(f"新聞情緒檢查失敗 {symbol}: {exc}")
 
         df = self.fetch_symbol_data(symbol)
         if df is None:
-            return
+            analysis.stage = "DATA"
+            analysis.reason = "數據不可用"
+            return analysis
+        analysis.df = df
 
         price = float(df["close"].iloc[-1])
         pulse = self.realtime_pulse.check(symbol, last_close=price)
         if not pulse.get("ok", True):
-            reason = pulse.get("reason", "即時報價過舊")
-            logger.info(f"   ⏳ {reason}")
-            self.blotter.log_rejection(symbol, reason, stage="REALTIME")
-            return
+            analysis.stage = "REALTIME"
+            analysis.reason = pulse.get("reason", "即時報價過舊")
+            return analysis
         if pulse.get("quote", {}).get("price"):
             price = float(pulse["quote"]["price"])
         if price <= 0 or price > self.price_limit:
-            logger.info(f"   ⏳ 股價 ${price:.2f} 超出上限 ${self.price_limit}")
-            self.blotter.log_rejection(symbol, f"股價 {price:.2f} 超出上限")
-            return
+            analysis.stage = "PRICE_LIMIT"
+            analysis.reason = f"股價 ${price:.2f} 超出上限 ${self.price_limit}"
+            analysis.price = price
+            return analysis
+        analysis.price = price
 
         quant = QuantEngine.dynamic_score(df, weights=self.factor_weights)
         ma20 = float(df["close"].rolling(20).mean().iloc[-1])
@@ -658,49 +739,206 @@ class TradingBot:
         volume = float(df["volume"].iloc[-1])
         avg_volume = float(df["volume"].rolling(5).mean().iloc[-1])
         vol_ratio = volume / avg_volume if avg_volume > 0 else 1.0
+        analysis.quant = quant
 
         context = MarketContext(
-            symbol=symbol, price=price, vix=self.current_vix, zscore_min=self.zscore_min,
+            symbol=symbol, price=price, vix=self.current_vix,
+            zscore_min=float(self.threshold_overrides.get("zscore_min", self.zscore_min)),
             exposure=self.exposure, breadth_score=self.breadth_score, quant=quant,
             vol_ratio=vol_ratio, ma20=ma20, ma50=ma50,
             regime=self.current_regime.regime if self.current_regime else "NEUTRAL",
             regime_score=self.current_regime.score if self.current_regime else None,
             allow_new_entries=self.allow_new_entries,
+            threshold_overrides=self.threshold_overrides,
         )
-
-        can_trade, emo_msg = self.emotion.check_before_trade()
+        analysis.context = context
 
         for strategy in self.strategies:
             ok, prefilter_reason = strategy.prefilter(df, context)
             if not ok:
-                logger.info(f"   ⏳ [{strategy.name}] {prefilter_reason}")
-                self.blotter.log_rejection(symbol, prefilter_reason, stage="PREFILTER")
-                continue
+                analysis.stage = "PREFILTER"
+                analysis.reason = f"[{strategy.name}] {prefilter_reason}"
+                return analysis
 
             signal = strategy.generate_signal(df, context)
-            self.blotter.log_signal(symbol, signal, quant, vol_ratio, self.exposure)
-
-            action = signal.get("action")
-            if action in ("STRONG_BUY", "MODERATE_BUY"):
-                if not can_trade:
-                    logger.warning(f"   {emo_msg}")
-                    self.blotter.log_rejection(symbol, emo_msg, stage="EMOTION")
-                    continue
-                quality_ok, quality_msg = self.swing_filter.validate(
+            analysis.signal = signal
+            if signal.get("action") in ("STRONG_BUY", "MODERATE_BUY"):
+                analysis.quality_ok, analysis.quality_reason = self.swing_filter.validate(
                     symbol, signal, context, df=df,
                 )
-                if not quality_ok:
-                    logger.info(f"   ⏳ 品質過濾: {quality_msg}")
-                    self.blotter.log_rejection(symbol, quality_msg, stage="SWING_QUALITY")
-                    continue
-                logger.info(f"   ✅ {quality_msg}")
-                self.handle_buy(symbol, signal, quant, vol_ratio, df=df)
-                return True
-            elif action == "STRONG_SELL":
-                self.handle_sell(symbol, signal, price)
-                return True
-            else:
-                logger.info(f"   ⏳ [{strategy.name}] {signal.get('reason', '')} (RSI {quant.get('rsi', 0):.1f})")
+            analysis.ok = True
+            analysis.stage = "SIGNAL"
+            return analysis
+
+        analysis.stage = "NO_STRATEGY"
+        analysis.reason = "未載入策略"
+        return analysis
+
+    def evaluate_retail(self, analysis, external_signal=None):
+        """Second opinion from the retail seat: affordable, tradable, worth it?"""
+        return self.retail_mind.evaluate(
+            analysis.symbol,
+            analysis.signal,
+            analysis.context,
+            df=analysis.df,
+            fundamental_view=analysis.fundamental_view,
+            news_view=analysis.news_view,
+            external_signal=external_signal,
+            capital=self.risk_mgr.total_capital,
+            max_shares=self.max_shares,
+            max_symbol_pct=self.portfolio.max_symbol_pct,
+        )
+
+    # ----- external app integration -----
+
+    def process_external_signals(self):
+        """Review ideas pushed in from the companion app and log a verdict."""
+        if not getattr(self.external_inbox, "enabled", False):
+            return []
+
+        try:
+            pending = self.external_inbox.poll()
+        except Exception as exc:
+            logger.warning(f"外部訊號讀取失敗: {exc}")
+            return []
+        if not pending:
+            return []
+
+        logger.info(f"📥 收到 {len(pending)} 則外部訊號")
+        reports = []
+        for signal_in in pending:
+            try:
+                report = self.reviewer.review(signal_in)
+            except Exception as exc:
+                logger.exception(f"外部訊號審視失敗 {signal_in.symbol}: {exc}")
+                self.external_inbox.mark_processed(signal_in.id)
+                continue
+
+            logger.info(
+                f"   📌 {signal_in.symbol} → {report['verdict']}: {report.get('explanation', '')}"
+            )
+            self.external_inbox.write_verdict(signal_in, report)
+            self.external_inbox.mark_processed(signal_in.id)
+            self.blotter.log_event(
+                "EXTERNAL_REVIEW",
+                symbol=signal_in.symbol,
+                reason=f"{report['verdict']} | {report.get('explanation', '')[:160]}",
+            )
+            if signal_in.symbol not in self.watchlist and report["verdict"] in ("BUY", "WATCH"):
+                self.watchlist.append(signal_in.symbol)
+                logger.info(f"   ➕ {signal_in.symbol} 已加入本輪 watchlist")
+            reports.append(report)
+        return reports
+
+    def analyze_watchlist(self):
+        """One-shot decision table for the active watchlist (no orders placed)."""
+        self.refresh_vix()
+        self.refresh_market_context(force=True)
+        self.refresh_watchlist_if_due(force=True)
+        self.refresh_pacing()
+
+        rows = []
+        for symbol in self.watchlist:
+            analysis = self.analyze_symbol(symbol)
+            row = {
+                "symbol": symbol,
+                "stage": analysis.stage,
+                "price": round(analysis.price, 2) if analysis.price else None,
+                "tier": (analysis.fundamental_view or {}).get("tier"),
+                "action": (analysis.signal or {}).get("action", "—"),
+                "confluence": (analysis.signal or {}).get("confluence_score"),
+                "missing_edges": (analysis.signal or {}).get("missing_edges"),
+                "quality": analysis.quality_reason,
+                "verdict": "SKIP",
+                "reason": analysis.reason,
+            }
+            if analysis.ok and (analysis.signal or {}).get("action") in ("STRONG_BUY", "MODERATE_BUY"):
+                if analysis.quality_ok:
+                    retail = self.evaluate_retail(analysis)
+                    row["verdict"] = retail.verdict
+                    row["retail_score"] = retail.retail_score
+                    row["size_factor"] = retail.size_factor
+                    row["reason"] = retail.summary()
+                    row["metrics"] = retail.metrics
+                else:
+                    row["verdict"] = "FILTERED"
+                    row["reason"] = analysis.quality_reason
+            elif analysis.ok:
+                row["verdict"] = "HOLD"
+            rows.append(row)
+
+        rank = {"BUY": 0, "WATCH": 1, "FILTERED": 2, "HOLD": 3, "SKIP": 4}
+        rows.sort(key=lambda r: (rank.get(r["verdict"], 5), -(r.get("confluence") or 0)))
+        return {
+            "market": {
+                "regime": self.current_regime.regime if self.current_regime else "N/A",
+                "vix": round(self.current_vix, 2),
+                "breadth": self.breadth_score,
+                "pacing": self.pace_status.summary() if self.pace_status else None,
+                "thresholds": self.threshold_overrides,
+            },
+            "symbols": rows,
+        }
+
+    def process_symbol(self, symbol):
+        logger.info(f"\n🔍 分析: {symbol}")
+
+        analysis = self.analyze_symbol(symbol)
+        if not analysis.ok:
+            logger.info(f"   ⏳ [{analysis.stage}] {analysis.reason}")
+            if analysis.stage in ("FUNDAMENTAL", "NEWS", "REALTIME", "PRICE_LIMIT", "PREFILTER"):
+                self.blotter.log_rejection(symbol, analysis.reason, stage=analysis.stage)
+            return
+        if analysis.reason:
+            logger.info(f"   📰 {analysis.reason}")
+
+        signal = analysis.signal
+        quant = analysis.quant
+        vol_ratio = analysis.context.vol_ratio
+        df = analysis.df
+        self.blotter.log_signal(symbol, signal, quant, vol_ratio, self.exposure)
+
+        action = signal.get("action")
+        if action in ("STRONG_BUY", "MODERATE_BUY"):
+            can_trade, emo_msg = self.emotion.check_before_trade()
+            if not can_trade:
+                logger.warning(f"   {emo_msg}")
+                self.blotter.log_rejection(symbol, emo_msg, stage="EMOTION")
+                return False
+
+            if self.pace_status is not None and not self.pace_status.allow_new_entry:
+                reason = "; ".join(self.pace_status.reasons)
+                logger.info(f"   ⏳ 交易節奏: {reason}")
+                self.blotter.log_rejection(symbol, reason, stage="PACING")
+                return False
+
+            if not analysis.quality_ok:
+                logger.info(f"   ⏳ 品質過濾: {analysis.quality_reason}")
+                self.blotter.log_rejection(symbol, analysis.quality_reason, stage="SWING_QUALITY")
+                return False
+            logger.info(f"   ✅ {analysis.quality_reason}")
+
+            retail = self.evaluate_retail(analysis)
+            if not retail.approve:
+                logger.info(f"   🧑‍💻 散戶視角: {retail.summary()}")
+                self.blotter.log_rejection(symbol, retail.summary(), stage="RETAIL")
+                return False
+            logger.info(f"   🧑‍💻 {retail.summary()}")
+            for thought in retail.thoughts[:2]:
+                logger.info(f"      · {thought}")
+            signal["retail_size_factor"] = retail.size_factor
+            signal["retail_score"] = retail.retail_score
+
+            self.handle_buy(symbol, signal, quant, vol_ratio, df=df)
+            return True
+
+        if action == "STRONG_SELL":
+            self.handle_sell(symbol, signal, analysis.price)
+            return True
+
+        logger.info(
+            f"   ⏳ {signal.get('reason', '')} (RSI {quant.get('rsi', 0):.1f})"
+        )
         return False
 
     # ----- risk gates -----
@@ -807,6 +1045,7 @@ class TradingBot:
         self.refresh_vix()
         self.refresh_market_context(force=True)
         self.refresh_watchlist_if_due(force=True)
+        self.refresh_pacing()
         self._run_candle_lab_auto_learn()
         self.reconcile()
 
@@ -828,7 +1067,9 @@ class TradingBot:
                     self.refresh_market_context()
                     self.refresh_vix()
                     self.refresh_watchlist_if_due()
+                    self.refresh_pacing()
                     self.reconcile()
+                    self.process_external_signals()
 
                     self.cycle_mind = self.professional.deliberate_cycle(
                         self.current_regime, self.portfolio, self.risk_mgr.total_capital,
@@ -939,7 +1180,36 @@ def parse_args(argv=None):
     parser.add_argument("--env", default="data/.env")
     parser.add_argument("--dry-run", action="store_true", help="強制僅信號模式，不下單")
     parser.add_argument("--once", action="store_true", help="只執行一次掃描後結束")
+    parser.add_argument(
+        "--analyze", action="store_true",
+        help="輸出觀察名單的買/不買決策表後結束（不下單）",
+    )
+    parser.add_argument(
+        "--review-external", action="store_true",
+        help="只處理外部 App 送來的訊號後結束",
+    )
+    parser.add_argument("--json", action="store_true", help="以 JSON 輸出 --analyze 結果")
     return parser.parse_args(argv)
+
+
+def print_analysis(report):
+    market = report["market"]
+    print(
+        f"市場: {market['regime']} | VIX {market['vix']} | 廣度 {market['breadth']} | "
+        f"{market['pacing']}"
+    )
+    header = f"{'標的':<8}{'判定':<10}{'動作':<14}{'共振':<6}{'散戶分':<8}{'倉位':<8}說明"
+    print(header)
+    print("-" * len(header))
+    for row in report["symbols"]:
+        size = row.get("size_factor")
+        print(
+            f"{row['symbol']:<8}{row['verdict']:<10}{str(row['action']):<14}"
+            f"{str(row.get('confluence') or '-'):<6}"
+            f"{str(row.get('retail_score') or '-'):<8}"
+            f"{(f'{size:.0%}' if size else '-'):<8}"
+            f"{(row.get('reason') or '')[:70]}"
+        )
 
 
 def main(argv=None):
@@ -947,7 +1217,24 @@ def main(argv=None):
     config = load_config(args.config, args.env)
     configure_logging(config.get("logging", {}))
 
-    bot = TradingBot(config, dry_run=args.dry_run)
+    bot = TradingBot(config, dry_run=args.dry_run or args.analyze)
+
+    if args.analyze:
+        report = bot.analyze_watchlist()
+        if args.json:
+            print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+        else:
+            print_analysis(report)
+        return 0
+
+    if args.review_external:
+        bot.refresh_vix()
+        bot.refresh_market_context(force=True)
+        bot.refresh_pacing()
+        reports = bot.process_external_signals()
+        print(json.dumps(reports, ensure_ascii=False, indent=2, default=str))
+        return 0
+
     if args.once:
         bot.max_cycles = 1
         bot.market_hours_only = False

@@ -137,3 +137,78 @@ def test_clear_entire_cache(monkeypatch):
 def test_get_earnings_date(monkeypatch, filt):
     patch_ticker(monkeypatch, GOOD_INFO)
     assert filt.get_earnings_date("AAPL") == "2026-09-01"
+
+
+# ----- retail mode: tier instead of veto -----
+
+@pytest.fixture
+def retail_filt():
+    return FundamentalFilter({"enabled": True, "mode": "retail"})
+
+
+def test_retail_mode_grades_quality_stock_as_tier_a(monkeypatch, retail_filt):
+    patch_ticker(monkeypatch, GOOD_INFO)
+    view = retail_filt.assess("AAPL")
+    assert view.passed is True
+    assert view.tier == "A"
+
+
+def test_retail_mode_allows_loss_making_growth_as_tier_c(monkeypatch, retail_filt):
+    patch_ticker(monkeypatch, {**GOOD_INFO, "trailingPE": None, "forwardPE": 25.0})
+    view = retail_filt.assess("LOSS")
+    assert view.passed is True
+    assert view.tier == "C"
+
+
+def test_retail_mode_allows_high_pe_growth(monkeypatch, retail_filt):
+    patch_ticker(monkeypatch, {**GOOD_INFO, "trailingPE": 45.0})
+    view = retail_filt.assess("RICH")
+    assert view.passed is True
+    assert view.tier in ("A", "B")
+
+
+def test_retail_mode_flags_extreme_pe_as_tier_c(monkeypatch, retail_filt):
+    patch_ticker(monkeypatch, {**GOOD_INFO, "trailingPE": 150.0})
+    view = retail_filt.assess("BUBBLE")
+    assert view.passed is True
+    assert view.tier == "C"
+
+
+def test_retail_mode_still_vetoes_micro_caps(monkeypatch, retail_filt):
+    patch_ticker(monkeypatch, {**GOOD_INFO, "marketCap": 20_000_000})
+    view = retail_filt.assess("MICRO")
+    assert view.passed is False
+    assert view.tier == "D"
+
+
+def test_retail_mode_still_vetoes_illiquid_names(monkeypatch, retail_filt):
+    patch_ticker(monkeypatch, {**GOOD_INFO, "averageVolume": 10_000})
+    view = retail_filt.assess("THIN")
+    assert view.passed is False
+    assert view.tier == "D"
+
+
+def test_retail_mode_can_forbid_unprofitable(monkeypatch):
+    filt = FundamentalFilter(
+        {"enabled": True, "mode": "retail", "retail": {"allow_unprofitable": False}}
+    )
+    patch_ticker(monkeypatch, {**GOOD_INFO, "trailingPE": None})
+    assert filt.assess("LOSS").passed is False
+
+
+def test_accuracy_flags_surface_data_gaps(monkeypatch, retail_filt):
+    patch_ticker(
+        monkeypatch,
+        {**GOOD_INFO, "trailingPE": 90.0, "forwardPE": 20.0, "profitMargins": -0.2},
+    )
+    view = retail_filt.assess("FLAGS")
+    joined = " ".join(view.flags)
+    assert "forward PE" in joined
+    assert "虧損中" in joined
+
+
+def test_view_serialises_for_reports(monkeypatch, retail_filt):
+    patch_ticker(monkeypatch, GOOD_INFO)
+    payload = retail_filt.assess("AAPL").to_dict()
+    assert payload["tier"] == "A"
+    assert payload["metrics"]["market_cap"] == GOOD_INFO["marketCap"]

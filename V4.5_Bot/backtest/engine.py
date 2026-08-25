@@ -5,15 +5,20 @@ Deliberately reuses QuantEngine, the strategy plugins, RiskManager and
 """
 
 import logging
+from datetime import datetime, timedelta
+
+import pandas as pd
 
 from core.data_utils import normalize_columns
 from core.entry_pipeline import EntryPipeline
 from core.intraday_engine import IntradayEngine
 from core.portfolio import Portfolio
 from core.quant_engine import QuantEngine
+from core.retail_mind import RetailMind
 from core.risk_manager import RiskManager
 from core.strategies import MarketContext, load_strategies
 from core.swing_filters import SwingQualityFilter
+from core.trade_pacing import TradePacer
 from core.trading_state import TradingState
 
 logger = logging.getLogger(__name__)
@@ -25,6 +30,8 @@ class BacktestResult:
         self.trades = []
         self.equity_curve = []
         self.mind_rejections = 0
+        self.retail_rejections = 0
+        self.bars = 0
 
     def add_trade(self, trade):
         self.trades.append(trade)
@@ -72,6 +79,13 @@ class BacktestResult:
     def total_costs(self):
         return round(sum(t.get("costs", 0.0) for t in self.trades), 2)
 
+    @property
+    def trades_per_month(self):
+        """Entries per 21 trading bars — the frequency target is expressed monthly."""
+        if not self.bars:
+            return 0.0
+        return round(len(self.trades) / (self.bars / 21.0), 2)
+
     def summary(self):
         return {
             "initial_capital": round(self.initial_capital, 2),
@@ -83,6 +97,8 @@ class BacktestResult:
             "max_drawdown_pct": round(self.max_drawdown_pct, 2),
             "total_costs": self.total_costs,
             "mind_rejections": self.mind_rejections,
+            "retail_rejections": self.retail_rejections,
+            "trades_per_month": self.trades_per_month,
         }
 
     def __repr__(self):
@@ -97,7 +113,7 @@ class BacktestEngine:
     """
 
     def __init__(self, config=None, initial_capital=10000.0, warmup_bars=60,
-                 max_hold_bars=20, professional_mind=None):
+                 max_hold_bars=20, professional_mind=None, pacing_target=None):
         self.config = config or {}
         self.initial_capital = float(initial_capital)
         self.warmup_bars = int(warmup_bars)
@@ -124,9 +140,31 @@ class BacktestEngine:
 
         self.professional = professional_mind
         self.mind_rejections = 0
+        self.retail_rejections = 0
+        self.pacing_blocks = 0
         self._disabled_intraday = IntradayEngine({"enabled": False})
         self.swing_filter = SwingQualityFilter(self.config.get("swing_trading", {}))
         self.breadth_score = 50.0
+
+        retail_cfg = dict(self.config.get("retail_mind", {}) or {})
+        retail_cfg.setdefault("commission_per_share", self.commission_per_share)
+        retail_cfg.setdefault("commission_minimum", self.commission_minimum)
+        self.use_retail_mind = bool(costs.get("use_retail_mind", True))
+        self.retail_mind = RetailMind(retail_cfg)
+
+        # Pacing is portfolio-level live; a per-symbol replay gets a scaled target.
+        pacing_cfg = dict(self.config.get("trade_pacing", {}) or {})
+        pacing_cfg["state_file"] = None
+        if pacing_target is not None:
+            pacing_cfg["target_trades_per_month"] = pacing_target
+            pacing_cfg["max_trades_per_month"] = max(
+                1, int(round(float(pacing_target) * 1.5))
+            )
+        self.use_pacing = bool(costs.get("use_pacing", True))
+        self.pacing_cfg = pacing_cfg
+        self.max_symbol_pct = float(
+            self.config.get("portfolio", {}).get("max_symbol_pct", 100.0)
+        )
 
     def entry_with_slippage(self, price):
         """Mirror ``TradingBot.entry_with_slippage`` so fills are comparable."""
@@ -163,9 +201,33 @@ class BacktestEngine:
             max_gross_pct_fn=lambda: gross_cap,
         )
 
+    def _base_thresholds(self):
+        swing = self.config.get("swing_trading", {}) or {}
+        candle = self.config.get("candle", {}) or {}
+        strat = (self.config.get("strategies") or [{}])[0] or {}
+        return {
+            "strong_min_confluence": int(swing.get("strong_min_confluence", 4)),
+            "moderate_min_confluence": int(swing.get("moderate_min_confluence", 3)),
+            "moderate_min_edges": int(swing.get("moderate_min_edges", 3)),
+            "rsi_max": float(swing.get("rsi_max", 72)),
+            "reject_rsi_above": float(swing.get("reject_rsi_above", 78)),
+            "zscore_max": float(swing.get("zscore_max", 1.45)),
+            "zscore_min": float(self.zscore_min),
+            "min_candle_strength": float(candle.get("min_strength", 0.30)),
+            "min_vol_ratio_high": float(strat.get("min_vol_ratio_high", 1.2)),
+            "retail_min_score": int(self.retail_mind.cfg.get("min_retail_score", 5)),
+        }
+
     def run(self, symbol, df, vix=18.0):
-        df = normalize_columns(df).reset_index(drop=True)
+        frame = normalize_columns(df)
+        bar_dates = (
+            list(frame.index) if isinstance(frame.index, pd.DatetimeIndex) else None
+        )
+        df = frame.reset_index(drop=True)
         result = BacktestResult(self.initial_capital)
+        pacer = TradePacer(self.pacing_cfg, state_file=None)
+        base_thresholds = self._base_thresholds()
+        synthetic_epoch = datetime(2000, 1, 1)
 
         state = TradingState(initial_capital=self.initial_capital)
         risk_mgr = RiskManager(
@@ -222,11 +284,27 @@ class BacktestEngine:
             avg_volume = float(window["volume"].rolling(5).mean().iloc[-1])
             vol_ratio = volume / avg_volume if avg_volume > 0 else 1.0
 
+            bar_time = (
+                bar_dates[index].to_pydatetime()
+                if bar_dates is not None
+                else synthetic_epoch + timedelta(days=index * 1.4)
+            )
+            if self.use_pacing:
+                thresholds, pace = pacer.apply(base_thresholds, now=bar_time)
+            else:
+                thresholds, pace = dict(base_thresholds), None
+
             context = MarketContext(
-                symbol=symbol, price=price, vix=vix, zscore_min=self.zscore_min,
+                symbol=symbol, price=price, vix=vix,
+                zscore_min=float(thresholds.get("zscore_min", self.zscore_min)),
                 quant=quant, vol_ratio=vol_ratio, ma20=ma20, ma50=ma50,
                 breadth_score=self.breadth_score,
+                threshold_overrides=thresholds,
             )
+
+            if pace is not None and not pace.allow_new_entry:
+                self.pacing_blocks += 1
+                continue
 
             for strategy in self.strategies:
                 ok, _ = strategy.prefilter(window, context)
@@ -239,6 +317,21 @@ class BacktestEngine:
                 quality_ok, _ = self.swing_filter.validate(symbol, signal, context, df=window)
                 if not quality_ok:
                     continue
+
+                if self.use_retail_mind:
+                    retail_cfg_score = thresholds.get("retail_min_score")
+                    if retail_cfg_score is not None:
+                        self.retail_mind.cfg["min_retail_score"] = int(retail_cfg_score)
+                    retail = self.retail_mind.evaluate(
+                        symbol, signal, context, df=window,
+                        capital=risk_mgr.total_capital,
+                        max_shares=self.max_shares,
+                        max_symbol_pct=self.max_symbol_pct,
+                    )
+                    if not retail.approve:
+                        self.retail_rejections += 1
+                        continue
+                    signal["retail_size_factor"] = retail.size_factor
 
                 entry_result = pipeline.run(
                     symbol, signal, quant, df=window,
@@ -267,6 +360,7 @@ class BacktestEngine:
                     "shares": shares,
                     "commission": self.commission(shares),
                 }
+                pacer.record_entry(when=bar_time, persist=False)
                 portfolio.sync({symbol: {"quantity": shares, "avg_cost": entry}}, {symbol: entry})
                 portfolio.set_stop(symbol, stop)
                 break
@@ -292,6 +386,8 @@ class BacktestEngine:
             result.equity_curve.append((len(df) - 1, risk_mgr.total_capital))
 
         result.mind_rejections = self.mind_rejections
+        result.retail_rejections = self.retail_rejections
+        result.bars = max(0, len(df) - self.warmup_bars)
         return result
 
     def _check_exit(self, bar, trade, index):

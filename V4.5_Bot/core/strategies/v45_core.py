@@ -40,7 +40,9 @@ class V45CoreStrategy(BaseStrategy):
                 return False, f"Swing 趨勢: 價格 {context.price:.2f} <= MA50 {context.ma50:.2f}"
 
         if context.vol_ratio is not None:
-            soft_vol = max(1.0, self.min_vol_ratio_high - 0.15)
+            overrides = getattr(context, "threshold_overrides", None) or {}
+            min_vol_high = float(overrides.get("min_vol_ratio_high", self.min_vol_ratio_high))
+            soft_vol = max(1.0, min_vol_high - 0.15)
             if not (context.vol_ratio > soft_vol or context.vol_ratio < self.max_vol_ratio_low):
                 return False, f"量比 {context.vol_ratio:.2f} 不符合"
 
@@ -49,9 +51,17 @@ class V45CoreStrategy(BaseStrategy):
     def generate_signal(self, df, context):
         candle_cfg = dict((self.config.get("_root_candle") or {}) if isinstance(self.config, dict) else {})
         swing_cfg = dict((self.config.get("_root_swing") or {}) if isinstance(self.config, dict) else {})
+
+        # Pace-adjusted thresholds win over static config for the soft gates.
+        overrides = getattr(context, "threshold_overrides", None) or {}
+        for key in ("moderate_min_edges", "moderate_min_confluence", "zscore_max"):
+            if key in overrides:
+                swing_cfg[key] = overrides[key]
         candle_cfg["_swing"] = swing_cfg
-        min_strength = float(candle_cfg.get("min_strength", 0.4))
+
+        min_strength = float(overrides.get("min_candle_strength", candle_cfg.get("min_strength", 0.4)))
         zmax = float(swing_cfg.get("zscore_max", 1.45))
+        min_vol_high = float(overrides.get("min_vol_ratio_high", self.min_vol_ratio_high))
         return TradingSignals.get_combined_signal(
             df,
             context.price,
@@ -62,7 +72,7 @@ class V45CoreStrategy(BaseStrategy):
             context.ma50,
             zscore_min=context.zscore_min,
             min_candle_strength=min_strength,
-            min_vol_ratio_high=self.min_vol_ratio_high,
+            min_vol_ratio_high=min_vol_high,
             max_vol_ratio_low=self.max_vol_ratio_low,
             trend_mode=self.trend_mode,
             zscore_max=zmax,

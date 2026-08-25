@@ -25,6 +25,8 @@ def parse_args(argv=None):
     parser.add_argument("--json", action="store_true", help="以 JSON 輸出")
     parser.add_argument("--no-costs", action="store_true", help="關閉手續費/滑點（僅供對照）")
     parser.add_argument("--no-mind", action="store_true", help="跳過心態層審批（僅供對照）")
+    parser.add_argument("--no-retail", action="store_true", help="關閉散戶思維層（僅供對照）")
+    parser.add_argument("--no-pacing", action="store_true", help="關閉交易節奏調節（僅供對照）")
     return parser.parse_args(argv)
 
 
@@ -36,28 +38,49 @@ def build_mind(config):
     return ProfessionalMind(mind_cfg)
 
 
+def watchlist_symbols(config):
+    """Flatten the core/satellite watchlist shape into a plain symbol list."""
+    wl = config.get("watchlist", [])
+    if isinstance(wl, dict):
+        return list(dict.fromkeys((wl.get("core") or []) + (wl.get("satellite") or [])))
+    return list(wl)
+
+
 def main(argv=None):
     args = parse_args(argv)
     config = load_config(args.config)
-    symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()] or config.get("watchlist", [])
+    symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()] or watchlist_symbols(config)
     if not symbols:
         print("未指定標的")
         return 1
 
     if args.no_costs:
         config.setdefault("backtest", {})["apply_costs"] = False
+    if args.no_retail:
+        config.setdefault("backtest", {})["use_retail_mind"] = False
+    if args.no_pacing:
+        config.setdefault("backtest", {})["use_pacing"] = False
 
     use_mind = config.get("backtest", {}).get("use_professional_mind", True)
     mind = None if args.no_mind or not use_mind else build_mind(config)
 
+    # The monthly target is portfolio-wide; a per-symbol replay gets its share.
+    monthly_target = float(
+        (config.get("trade_pacing", {}) or {}).get("target_trades_per_month", 8)
+    )
+    pacing_target = max(1.0, monthly_target / max(1, len(symbols)))
+
     engine = BacktestEngine(
         config, initial_capital=args.capital, max_hold_bars=args.max_hold_bars,
-        professional_mind=mind,
+        professional_mind=mind, pacing_target=pacing_target,
     )
     if not args.json:
         print(
             f"成本模型: {'啟用' if engine.apply_costs else '關閉'} | "
-            f"心態層審批: {'啟用' if mind else '關閉'}"
+            f"心態層審批: {'啟用' if mind else '關閉'} | "
+            f"散戶層: {'啟用' if engine.use_retail_mind else '關閉'} | "
+            f"節奏調節: {'啟用' if engine.use_pacing else '關閉'} "
+            f"(每標的 {pacing_target:.2f} 單/月)"
         )
     summaries, closes = {}, {}
 
