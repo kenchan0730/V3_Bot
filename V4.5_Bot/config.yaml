@@ -1,4 +1,4 @@
-# V4.5 系統設定檔（機構級）
+# V4.5 系統設定檔（積極散戶模式）
 # ${VAR} 會在載入時由 .env / 環境變數展開；${VAR:-default} 可指定預設值。
 
 capital:
@@ -12,30 +12,24 @@ ibkr:
   max_retries: 10
 
 risk:
-  # 小資金必須集中：$1,275 的部位若只有 $200，來回 $2 手續費就是 1% 的固定損耗。
-  # 2 年回測（40 檔優質大型股）：1.5%/20% 倉 → 淨 -$19；2.0%/33% 倉 → 淨 +$34。
-  max_risk_percent: 2.0
-  max_loss_streak: 3
-  reduced_risk_percent: 1.2
-  # 集中度上限的單一事實來源是 portfolio.max_symbol_pct；
-  # main.py 啟動時會注入覆蓋此值（此處僅為獨立使用/回測的預設）。
-  max_position_pct: 40.0
-  # 兩條獨立防線：回撤護利潤、絕對虧損護本金（刻意留出間距，避免同時觸發）
-  max_drawdown_limit: 12.0        # 相對高位回撤 → 停機
-  max_absolute_loss: 8.0          # 相對初始資本虧損 → 停機
-  drawdown_warning_pct: 6.0       # 警戒帶：先降風險，不停機
-  drawdown_warning_risk_pct: 0.75
-  daily_loss_limit: 2.0
-  vix_risk_cap: 1.5
+  # 積極散戶：接受更大波動換取更高報酬；零佣金下可把預算用在倉位而非手續費。
+  max_risk_percent: 3.0
+  max_loss_streak: 4
+  reduced_risk_percent: 2.0
+  max_position_pct: 50.0
+  max_drawdown_limit: 18.0
+  max_absolute_loss: 12.0
+  drawdown_warning_pct: 12.0
+  drawdown_warning_risk_pct: 2.0
+  daily_loss_limit: 4.0
+  vix_risk_cap: 2.5
 
 portfolio:
-  # max_symbol_pct 是單一標的集中度的單一事實來源（會注入 RiskManager）
-  # 3 檔 × 40% ≈ 滿倉；5y grid（10 檔）40% 優於 33%。
   max_gross_exposure_pct: 99.0
-  max_open_positions: 3
-  max_sector_pct: 40.0
-  max_symbol_pct: 40.0
-  max_total_open_risk_pct: 6.0
+  max_open_positions: 5
+  max_sector_pct: 50.0
+  max_symbol_pct: 50.0
+  max_total_open_risk_pct: 10.0
   correlation_threshold: 0.8
   sector_map:
     AAPL: Technology
@@ -87,7 +81,7 @@ portfolio:
 #   零佣金（lite/alpaca/schwab）→ +155%
 # 差距約 116 個百分點，全部來自每單 $2 的來回固定費用。
 broker:
-  profile: ibkr_pro              # ibkr_pro | ibkr_lite | alpaca | schwab | custom
+  profile: ibkr_lite              # 零佣金：月 10 單時硬成本從 ~$20/月 → 滑點 only
   profiles:
     ibkr_pro:
       commission_per_share: 0.005
@@ -106,12 +100,13 @@ broker:
       commission_minimum: 0.0
 
 backtest:
-  apply_costs: true               # 回測套用手續費+滑點，避免高估實盤績效
+  apply_costs: true               # 仍套用滑點；佣金由 broker.profile 決定
   exit_slippage_ticks: 1
-  use_professional_mind: true     # 回測同樣走心態層審批鏈
-  use_retail_mind: true           # 回測同樣走散戶思維層
-  use_pacing: true                # 回測同樣套用月度節奏調節
-  use_live_throttles: true        # 組合回測：regime/情緒/回撤節流與 live 對齊
+  max_hold_bars: 10               # 對齊 trading.max_hold_days，加快周轉
+  use_professional_mind: true
+  use_retail_mind: true
+  use_pacing: true
+  use_live_throttles: true
 
 execution:
   use_bracket_orders: true
@@ -153,7 +148,7 @@ trading:
   scan_interval_seconds: 300
   scan_interval_intraday: 60   # 盤中模式下的掃描間隔（秒）
   intraday_mode: false         # Swing：日線確認，不做盤中二次阻擋
-  max_hold_days: 28             # 與回測 max_hold_bars≈20 交易日對齊；超時平倉釋放資金
+  max_hold_days: 14             # 與 backtest.max_hold_bars 對齊；釋放僵屍倉
 
 regime:
   enabled: true
@@ -165,8 +160,8 @@ regime:
   breadth_neutral: 45.0
   breadth_risk_off: 30.0
   risk_on_exposure: 100
-  neutral_exposure: 60
-  risk_off_exposure: 25
+  neutral_exposure: 90
+  risk_off_exposure: 45
   crisis_exposure: 0
   risk_on_zscore_min: 0.45
   neutral_zscore_min: 0.5       # Swing 活躍：較低 Z 下限
@@ -250,7 +245,7 @@ watchlist:
   scanner:
     enabled: true
     source: sp500
-    max_scan: 250
+    max_scan: 300
     min_price: 20
     max_price: 400
 
@@ -258,7 +253,7 @@ strategies:
   - name: v45_core
     enabled: true
     require_structure: false     # Swing：用 MA50 趨勢（見 swing_trading.trend_mode）
-    min_vol_ratio_high: 1.2
+    min_vol_ratio_high: 1.25
     max_vol_ratio_low: 0.8
 
 # 散戶實務進場觸發：K 線形態只是其中一種，缺形態時改用回踩／突破／抬高低點。
@@ -276,28 +271,26 @@ retail_triggers:
   higher_low_enabled: true
   higher_low_strength: 0.40
   stop_atr_multiplier: 1.5
-  stop_pct_fallback: 3.0
+  stop_pct_fallback: 2.5
 
 candle:
   min_strength: 0.30             # Swing 活躍門檻
   use_learned_stats: true          # Candle Lab 胜率统计只读影响信号
   min_learned_samples: 8
-  min_learned_win_rate: 0.40       # 低于此胜率的形态不触发 BUY
-  auto_learn_on_startup: true       # bot 启动时自动学习 watchlist
-  learn_forward_bars: 10            # 形态后 N 根 K 衡量胜负
+  min_learned_win_rate: 0.45
+  auto_learn_on_startup: true
+  learn_forward_bars: 10
   learn_period: "6mo"
 
 emotion:
-  max_daily_trades: 2            # 月 8 單 ≈ 每週 2 單，單日 2 筆已足夠
-  max_loss_streak: 3
-  block_on_loss_streak: false    # 連虧改由 risk 層降倉，避免永久鎖死無法再交易
+  max_daily_trades: 4            # 月 10 單 ≈ 每週 2–3 單，單日最多 4 筆
+  max_loss_streak: 4
+  block_on_loss_streak: false
 
-# 月度交易節奏：落後目標才放寬「軟性」門檻，追上後自動收緊。
-# 風控上限（停損、曝險、集中度）永不受此影響。
 trade_pacing:
   enabled: true
-  target_trades_per_month: 8
-  max_trades_per_month: 12       # 硬上限：達到即停止新倉
+  target_trades_per_month: 10
+  max_trades_per_month: 14
   window_days: 30
   tolerance_pct: 25.0            # ±25% 視為節奏正常
   max_relax_level: 1.0
@@ -313,43 +306,42 @@ trade_pacing:
     min_candle_strength: -0.08
     min_vol_ratio_high: -0.10
     retail_min_score: -1
-  floors:                        # 放寬的地板，確保閘門不會失效
+  floors:
     strong_min_confluence: 3
     moderate_min_confluence: 3
     moderate_min_edges: 3
-    zscore_min: 0.30
-    min_candle_strength: 0.20
-    min_vol_ratio_high: 1.0
-    retail_min_score: 4
+    zscore_min: 0.35
+    min_candle_strength: 0.25
+    min_vol_ratio_high: 1.1
+    retail_min_score: 5
   ceilings:
-    rsi_max: 78.0
-    reject_rsi_above: 82.0
-    zscore_max: 1.80
+    rsi_max: 72.0
+    reject_rsi_above: 75.0
+    zscore_max: 1.55
 
-# 專業散戶視角：機構看規模與估值，散戶看催化劑、成本與可操作性。
 retail_mind:
   enabled: true
-  min_retail_score: 5
+  min_retail_score: 4
   watch_score_margin: 2
-  slippage_pct: 0.10
-  max_cost_drag_pct: 1.20        # 來回手續費+滑點佔倉位比重上限（回本門檻）
+  slippage_pct: 0.08
+  max_cost_drag_pct: 2.50        # 零佣金：主要剩滑點
   min_reward_risk: 1.4
-  max_extension_above_ma50_pct: 22.0   # 不追離均線過遠的股票
-  min_dollar_volume: 2000000     # 想賣時要有人接
-  max_spread_proxy_pct: 10.0     # 日均振幅硬上限（跳動過大＝滑點失控）
-  high_volatility_pct: 6.0       # 超過此值不擋，但扣分收斂倉位
-  catalyst_min_news_score: 0.12
-  catalyst_min_vol_ratio: 1.15
+  max_extension_above_ma50_pct: 25.0
+  min_dollar_volume: 1500000
+  max_spread_proxy_pct: 12.0
+  high_volatility_pct: 7.0
+  catalyst_min_news_score: 0.10
+  catalyst_min_vol_ratio: 1.1
   catalyst_bonus: 2
   require_catalyst: false
   external_signal_bonus: 1
   allow_unprofitable_growth: true
   unprofitable_needs_catalyst: true
-  size_ladder:                   # 評分 → 倉位比例
+  size_ladder:
     - [9, 1.0]
-    - [7, 0.75]
-    - [6, 0.55]
-    - [5, 0.4]
+    - [7, 0.9]
+    - [6, 0.8]
+    - [5, 0.7]
 
 # 與外部金融 App 聯通：App 寫入 inbox，機械人審視後把結論寫回 verdicts。
 external_signals:
@@ -369,22 +361,27 @@ swing_trading:
   trend_mode: swing
   moderate_buy_enabled: true
   moderate_min_edges: 3
-  moderate_min_confluence: 3
+  moderate_min_confluence: 4
   strong_min_confluence: 4
-  moderate_size_factor: 0.5
-  target_r_multiple: 4.0         # 5y grid（10 檔）4R 優於 2–3R；樣本外 2y 仍正
-  target2_r_multiple: 8.0
-  rsi_min: 28
-  rsi_max: 72
-  reject_rsi_above: 78
-  zscore_max: 1.45
+  moderate_size_factor: 0.75
+  target_r_multiple: 1.5
+  target2_r_multiple: 2.5
+  breakeven_after_r: 0
+  rsi_min: 35
+  rsi_max: 62
+  reject_rsi_above: 68
+  zscore_max: 1.35
+  min_vol_ratio: 1.2
+  require_price_above_ma20: true
+  min_strong_edges_strong: 2
+  min_strong_edges_moderate: 2
   require_sector_alignment: true
-  sector_filter_mode: soft       # soft=只擋極弱板塊 | hard=必須領先 | off=關閉
-  sector_block_rs_below: -4.0
-  min_sector_rs_pct: -2.0
+  sector_filter_mode: soft
+  sector_block_rs_below: -5.0
+  min_sector_rs_pct: -2.5
   top_sectors_count: 5
   sector_lookback: 1mo
-  min_market_breadth: 25
+  min_market_breadth: 20
   block_learned_losers: true
 
 fundamental:
@@ -480,57 +477,43 @@ audit:
 
 professional_mind:
   enabled: true
-  strategic_cash_enabled: true
-  min_regime_score_to_trade: 40
+  strategic_cash_enabled: false
+  min_regime_score_to_trade: 30
   log_every_deliberation: false
   journal_file: data/execution_journal.csv
-  # 共振分級：小資金不能把部位砍到 35%——手續費固定，砍半等於回本門檻翻倍。
-  # 低共振的正確做法是「不做」，不是「做很小」。
   conviction_sizing:
     enabled: true
-    full_size_score: 8
-    reduced_score: 7
-    minimum_score: 6
-    reduced_factor: 0.85
-    minimum_factor: 0.70
-    weak_factor: 0.70
-    reject_below: 6            # 低於 6 分直接拒絕，而不是縮到 35% 倉
+    full_size_score: 7
+    reduced_score: 6
+    minimum_score: 5
+    reduced_factor: 0.9
+    minimum_factor: 0.8
+    weak_factor: 0.75
+    reject_below: 5
   position_sizer:
     enabled: true
     atr_period: 14
-    atr_multiplier: 2.0
-    use_atr_stop: true
+    atr_multiplier: 1.5
+    use_atr_stop: false
     kelly_enabled: false
-    kelly_fraction: 0.25
-    kelly_win_rate: 0.45
-    kelly_avg_win: 1.5
-    kelly_avg_loss: 1.0
-    vix_scale_threshold: 25
-    vix_scale_factor: 0.7
-    max_risk_of_ruin: 0.05
+    vix_scale_threshold: 30
+    vix_scale_factor: 0.85
+    max_risk_of_ruin: 0.08
   economic_calendar:
-    enabled: true
-    risk_multiplier: 0.5
+    enabled: false
+    risk_multiplier: 1.0
     block_new_entries: false
   market_structure:
-    enabled: true
-    block_distribution_entries: true
+    enabled: false
+    block_distribution_entries: false
   liquidity:
-    enabled: true
-    avoid_first_minutes: 5
-    avoid_last_minutes: 10
+    enabled: false
   pdt:
-    enabled: true
-    min_equity: 25000
-    max_day_trades_rolling: 3
+    enabled: false
   pyramid:
-    enabled: true
-    forbid_averaging_down: true
-    min_profit_pct_to_add: 2.0
+    enabled: false
   portfolio_heat:
-    enabled: true
-    market_pullback_pct: 2.0
-    max_symbol_weight_pct: 35
+    enabled: false
   themes:
     enabled: true
     auto_expand_watchlist: true

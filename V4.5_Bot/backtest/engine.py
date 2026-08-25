@@ -148,6 +148,8 @@ class BacktestEngine:
         self._disabled_intraday = IntradayEngine({"enabled": False})
         self.swing_filter = SwingQualityFilter(self.config.get("swing_trading", {}))
         self.breadth_score = 50.0
+        swing_cfg = self.config.get("swing_trading", {}) or {}
+        self.breakeven_after_r = float(swing_cfg.get("breakeven_after_r", 0) or 0)
 
         retail_cfg = dict(self.config.get("retail_mind", {}) or {})
         broker = resolve_broker_costs(self.config)
@@ -364,9 +366,11 @@ class BacktestEngine:
 
                 open_trade = {
                     "index": index, "entry": entry, "stop": stop,
+                    "original_stop": stop,
                     "target": entry_result.target or signal.get("target1"),
                     "shares": shares,
                     "commission": self.commission(shares),
+                    "breakeven_after_r": self.breakeven_after_r,
                 }
                 pacer.record_entry(when=bar_time, persist=False)
                 portfolio.sync({symbol: {"quantity": shares, "avg_cost": entry}}, {symbol: entry})
@@ -400,8 +404,18 @@ class BacktestEngine:
 
     def _check_exit(self, bar, trade, index):
         low, high = float(bar["low"]), float(bar["high"])
-        if trade["stop"] and low <= trade["stop"]:
-            return trade["stop"], "STOP"
+        entry = float(trade.get("entry") or 0)
+        original_stop = float(trade.get("original_stop") or trade.get("stop") or 0)
+        if entry > 0 and original_stop > 0:
+            risk = entry - original_stop
+            be_r = float(trade.get("breakeven_after_r") or self.breakeven_after_r or 0)
+            if be_r > 0 and risk > 0 and high >= entry + risk * be_r:
+                trade["stop"] = max(float(trade.get("stop") or 0), entry)
+
+        stop = trade.get("stop")
+        if stop and low <= stop:
+            reason = "BREAKEVEN" if entry and stop >= entry - 0.02 else "STOP"
+            return stop, reason
         if trade["target"] and high >= trade["target"]:
             return trade["target"], "TARGET"
         if index - trade["index"] >= self.max_hold_bars:

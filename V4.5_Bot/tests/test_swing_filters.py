@@ -8,6 +8,29 @@ from core.trading_signals import TradingSignals
 from tests.test_trading_signals import _make_df, levels, with_hammer
 
 
+def test_swing_filter_rejects_insufficient_strong_edges():
+    filt = SwingQualityFilter({
+        "enabled": True, "min_strong_edges_strong": 2, "strong_min_confluence": 4,
+    })
+    ctx = MarketContext(
+        symbol="INTC", price=30, quant={"rsi": 55, "z_score": 0.9},
+        vol_ratio=1.5, breadth_score=50, ma20=29.0,
+    )
+    signal = {
+        "action": "STRONG_BUY", "track": "STRONG",
+        "confluence_score": 6, "strong_edges": ["trend"],
+    }
+    filt.portfolio = MagicMock()
+    filt.portfolio.sector_of.return_value = "Technology"
+    filt._sector_cache = {
+        "leading_sectors": ["Technology"],
+        "relative_strength": {"Technology": 2.0},
+    }
+    ok, reason = filt.validate("INTC", signal, ctx)
+    assert ok is False
+    assert "強化邊緣" in reason
+
+
 def test_moderate_buy_when_four_edges_pass():
     df = with_hammer(_make_df([10 + i * 0.08 for i in range(70)]))
     price, ma20, ma50 = levels(df)

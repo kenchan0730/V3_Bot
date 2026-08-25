@@ -339,12 +339,14 @@ class PortfolioBacktestEngine(BacktestEngine):
           "index": int(bar_idx),
           "entry": entry,
           "stop": stop,
+          "original_stop": stop,
           "target": entry_result.target or signal.get("target1"),
           "shares": shares,
           "commission": self.commission(shares),
           "entry_date": str(day),
           "risk_dollars": round(risk_dollars, 2),
           "risk_pct": round(risk_pct, 3),
+          "breakeven_after_r": self.breakeven_after_r,
         }
         pacer.record_entry(when=datetime.combine(day, datetime.min.time()), persist=False)
         portfolio.sync(

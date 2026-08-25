@@ -36,6 +36,10 @@ DEFAULTS = {
     "block_learned_losers": True,
     "require_bullish_candle_for_moderate": True,
     "zscore_max": 1.45,
+    "min_vol_ratio": 0.0,
+    "require_price_above_ma20": False,
+    "min_strong_edges_strong": 0,
+    "min_strong_edges_moderate": 0,
 }
 
 
@@ -85,6 +89,24 @@ class SwingQualityFilter:
         )
         if confluence < min_conf:
             return False, f"共振 {confluence}/10 < 門檻 {min_conf} ({track})"
+
+        strong_edges = signal.get("strong_edges") or []
+        min_strong = int(
+            self.cfg.get("min_strong_edges_strong", 0)
+            if track == "STRONG"
+            else self.cfg.get("min_strong_edges_moderate", 0)
+        )
+        if min_strong and len(strong_edges) < min_strong:
+            return False, f"強化邊緣 {len(strong_edges)} < {min_strong} ({track})"
+
+        min_vol = float(self.cfg.get("min_vol_ratio", 0))
+        vol_ratio = float(context.vol_ratio or 0)
+        if min_vol > 0 and vol_ratio < min_vol:
+            return False, f"量比 {vol_ratio:.2f} < {min_vol:.2f}"
+
+        if self.cfg.get("require_price_above_ma20") and context.ma20:
+            if float(context.price) <= float(context.ma20):
+                return False, f"價格 {context.price:.2f} <= MA20 {context.ma20:.2f}"
 
         quant = context.quant or {}
         rsi = float(quant.get("rsi") or 50)

@@ -65,6 +65,9 @@ def watchlist_symbols(config):
 def main(argv=None):
     args = parse_args(argv)
     config = load_config(args.config)
+    cfg_hold = int((config.get("backtest") or {}).get("max_hold_bars", 0) or 0)
+    if cfg_hold:
+        args.max_hold_bars = cfg_hold
     symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()] or watchlist_symbols(config)
     if not symbols:
         print("未指定標的")
