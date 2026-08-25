@@ -1,5 +1,6 @@
 import pandas as pd
 import pytest
+from datetime import date
 
 from core.portfolio import Portfolio
 
@@ -189,3 +190,17 @@ def test_update_price_recalculates_market_value(portfolio):
     portfolio.sync({"AAA": {"quantity": 10, "avg_cost": 20.0}}, {"AAA": 20.0})
     portfolio.update_price("AAA", 25.0)
     assert portfolio.gross_exposure() == pytest.approx(250.0)
+
+
+def test_record_entry_date_and_stale(portfolio):
+    portfolio.sync({"AAA": {"quantity": 10, "avg_cost": 20.0}}, {"AAA": 20.0})
+    portfolio.record_entry_date("AAA", when=date(2024, 1, 1))
+    assert portfolio.holding_days("AAA", today=date(2024, 1, 10)) == 9
+    stale = portfolio.stale_positions(7, today=date(2024, 1, 10))
+    assert stale == [("AAA", 9)]
+
+
+def test_clear_entry_date(portfolio):
+    portfolio.record_entry_date("AAA")
+    portfolio.clear_entry_date("AAA")
+    assert portfolio.holding_days("AAA") is None

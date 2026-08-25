@@ -19,7 +19,7 @@ risk:
   reduced_risk_percent: 1.2
   # 集中度上限的單一事實來源是 portfolio.max_symbol_pct；
   # main.py 啟動時會注入覆蓋此值（此處僅為獨立使用/回測的預設）。
-  max_position_pct: 33.0
+  max_position_pct: 40.0
   # 兩條獨立防線：回撤護利潤、絕對虧損護本金（刻意留出間距，避免同時觸發）
   max_drawdown_limit: 12.0        # 相對高位回撤 → 停機
   max_absolute_loss: 8.0          # 相對初始資本虧損 → 停機
@@ -30,11 +30,11 @@ risk:
 
 portfolio:
   # max_symbol_pct 是單一標的集中度的單一事實來源（會注入 RiskManager）
-  # 3 檔 × 33% ≈ 滿倉；散戶的優勢是可以集中，機構因授權限制不能。
+  # 3 檔 × 40% ≈ 滿倉；5y grid（10 檔）40% 優於 33%。
   max_gross_exposure_pct: 99.0
   max_open_positions: 3
   max_sector_pct: 40.0
-  max_symbol_pct: 33.0
+  max_symbol_pct: 40.0
   max_total_open_risk_pct: 6.0
   correlation_threshold: 0.8
   sector_map:
@@ -79,14 +79,39 @@ portfolio:
     HON: Industrials
     RTX: Industrials
 
+# 券商成本是本系統最大的單一變數，因此獨立成一節作為唯一事實來源
+# （回測、散戶層的成本閘門都從這裡讀）。
+#
+# 5 年回測（40 檔、$1,275、4.0R）實測：
+#   ibkr_pro（每單最低 $1）→  +39%
+#   零佣金（lite/alpaca/schwab）→ +155%
+# 差距約 116 個百分點，全部來自每單 $2 的來回固定費用。
+broker:
+  profile: ibkr_pro              # ibkr_pro | ibkr_lite | alpaca | schwab | custom
+  profiles:
+    ibkr_pro:
+      commission_per_share: 0.005
+      commission_minimum: 1.0
+    ibkr_lite:                   # 同一個 TWS API，美股 0 佣金
+      commission_per_share: 0.0
+      commission_minimum: 0.0
+    alpaca:
+      commission_per_share: 0.0
+      commission_minimum: 0.0
+    schwab:
+      commission_per_share: 0.0
+      commission_minimum: 0.0
+    custom:
+      commission_per_share: 0.0
+      commission_minimum: 0.0
+
 backtest:
   apply_costs: true               # 回測套用手續費+滑點，避免高估實盤績效
-  commission_per_share: 0.005     # IBKR 分層費率近似
-  commission_minimum: 1.0
   exit_slippage_ticks: 1
   use_professional_mind: true     # 回測同樣走心態層審批鏈
   use_retail_mind: true           # 回測同樣走散戶思維層
   use_pacing: true                # 回測同樣套用月度節奏調節
+  use_live_throttles: true        # 組合回測：regime/情緒/回撤節流與 live 對齊
 
 execution:
   use_bracket_orders: true
@@ -128,6 +153,7 @@ trading:
   scan_interval_seconds: 300
   scan_interval_intraday: 60   # 盤中模式下的掃描間隔（秒）
   intraday_mode: false         # Swing：日線確認，不做盤中二次阻擋
+  max_hold_days: 28             # 與回測 max_hold_bars≈20 交易日對齊；超時平倉釋放資金
 
 regime:
   enabled: true
@@ -264,6 +290,7 @@ candle:
 emotion:
   max_daily_trades: 2            # 月 8 單 ≈ 每週 2 單，單日 2 筆已足夠
   max_loss_streak: 3
+  block_on_loss_streak: false    # 連虧改由 risk 層降倉，避免永久鎖死無法再交易
 
 # 月度交易節奏：落後目標才放寬「軟性」門檻，追上後自動收緊。
 # 風控上限（停損、曝險、集中度）永不受此影響。
@@ -345,6 +372,8 @@ swing_trading:
   moderate_min_confluence: 3
   strong_min_confluence: 4
   moderate_size_factor: 0.5
+  target_r_multiple: 4.0         # 5y grid（10 檔）4R 優於 2–3R；樣本外 2y 仍正
+  target2_r_multiple: 8.0
   rsi_min: 28
   rsi_max: 72
   reject_rsi_above: 78

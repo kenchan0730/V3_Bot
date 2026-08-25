@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
+from core.broker_costs import resolve as resolve_broker_costs
 from core.data_utils import normalize_columns
 from core.entry_pipeline import EntryPipeline
 from core.intraday_engine import IntradayEngine
@@ -133,8 +134,10 @@ class BacktestEngine:
         self.tick_size = float(exec_cfg.get("tick_size", 0.01))
 
         costs = self.config.get("backtest", {}) or {}
-        self.commission_per_share = float(costs.get("commission_per_share", 0.005))
-        self.commission_minimum = float(costs.get("commission_minimum", 1.0))
+        broker = resolve_broker_costs(self.config)
+        self.broker_profile = broker.name
+        self.commission_per_share = broker.commission_per_share
+        self.commission_minimum = broker.commission_minimum
         self.exit_slippage_ticks = float(costs.get("exit_slippage_ticks", 1))
         self.apply_costs = bool(costs.get("apply_costs", True))
 
@@ -147,8 +150,10 @@ class BacktestEngine:
         self.breadth_score = 50.0
 
         retail_cfg = dict(self.config.get("retail_mind", {}) or {})
-        retail_cfg.setdefault("commission_per_share", self.commission_per_share)
-        retail_cfg.setdefault("commission_minimum", self.commission_minimum)
+        broker = resolve_broker_costs(self.config)
+        retail_cfg["broker_profile"] = broker
+        retail_cfg.setdefault("commission_per_share", broker.commission_per_share)
+        retail_cfg.setdefault("commission_minimum", broker.commission_minimum)
         self.use_retail_mind = bool(costs.get("use_retail_mind", True))
         self.retail_mind = RetailMind(retail_cfg)
 

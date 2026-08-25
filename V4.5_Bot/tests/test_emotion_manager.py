@@ -16,12 +16,26 @@ def test_allows_trading_when_calm(state):
     assert ok is True and message == "情緒正常"
 
 
-def test_blocks_after_loss_streak(state):
-    emotion = EmotionManager(state=state, max_loss_streak=3)
+def test_blocks_after_loss_streak_when_enabled(state):
+    emotion = EmotionManager(
+        state=state, max_loss_streak=3, config={"block_on_loss_streak": True},
+    )
     for _ in range(3):
         emotion.record_trade(-10.0)
     ok, message = emotion.check_before_trade()
     assert ok is False and "止蝕" in message
+
+
+def test_loss_streak_does_not_block_when_disabled(state):
+    emotion = EmotionManager(
+        state=state,
+        max_loss_streak=3,
+        config={"block_on_loss_streak": False, "max_daily_trades": 10},
+    )
+    for _ in range(3):
+        emotion.record_trade(-10.0)
+    ok, message = emotion.check_before_trade()
+    assert ok is True
 
 
 def test_blocks_after_daily_trade_cap(state):
@@ -40,7 +54,10 @@ def test_win_resets_streak(state):
 
 
 def test_config_overrides_defaults(state):
-    emotion = EmotionManager(state=state, config={"max_daily_trades": 1, "max_loss_streak": 1})
+    emotion = EmotionManager(
+        state=state,
+        config={"max_daily_trades": 1, "max_loss_streak": 1, "block_on_loss_streak": True},
+    )
     emotion.record_trade(1.0)
     ok, _ = emotion.check_before_trade()
     assert ok is False

@@ -68,6 +68,7 @@ class TradingBot:
         self.max_shares = int(trading_cfg.get("max_shares", 20))
         self.scan_interval = int(trading_cfg.get("scan_interval_seconds", 300))
         self.scan_interval_intraday = int(trading_cfg.get("scan_interval_intraday", 60))
+        self.max_hold_days = int(trading_cfg.get("max_hold_days", 0))
 
         wl_cfg = config.get("watchlist", ["AVAH"])
         self.regime_detector = RegimeDetector(config.get("regime", {}))
@@ -217,11 +218,14 @@ class TradingBot:
 
     @staticmethod
     def _build_retail_config(config):
-        """Retail mind inherits the same cost model the backtest charges."""
+        """Retail mind inherits the broker cost model (single source of truth)."""
+        from core.broker_costs import resolve
+
         retail_cfg = dict(config.get("retail_mind", {}) or {})
-        costs = config.get("backtest", {}) or {}
-        retail_cfg.setdefault("commission_per_share", costs.get("commission_per_share", 0.005))
-        retail_cfg.setdefault("commission_minimum", costs.get("commission_minimum", 1.0))
+        broker = resolve(config)
+        retail_cfg["broker_profile"] = broker
+        retail_cfg.setdefault("commission_per_share", broker.commission_per_share)
+        retail_cfg.setdefault("commission_minimum", broker.commission_minimum)
         return retail_cfg
 
     @staticmethod
@@ -252,10 +256,14 @@ class TradingBot:
         )
 
     def _restore_stops_from_state(self):
-        """Seed intended stops from the last persisted portfolio snapshot."""
+        """Seed intended stops and entry dates from the last persisted snapshot."""
         for symbol, pos in (self.state.positions or {}).items():
-            if isinstance(pos, dict) and pos.get("stop"):
+            if not isinstance(pos, dict):
+                continue
+            if pos.get("stop"):
                 self.portfolio.record_intended_stop(symbol, pos["stop"])
+            if pos.get("entry_date"):
+                self.portfolio.entry_dates[symbol] = pos["entry_date"]
 
     def _hydrate_broker_orders(self):
         if not self.ibkr.is_connected():
@@ -624,6 +632,7 @@ class TradingBot:
         )
         self.emotion.record_trade(0)
         self.pacer.record_entry()
+        self.portfolio.record_entry_date(symbol)
 
     def handle_sell(self, symbol, signal, price):
         logger.info(f"   🔴 賣出信號: {signal.get('reason', '')}")
@@ -789,6 +798,45 @@ class TradingBot:
             max_shares=self.max_shares,
             max_symbol_pct=self.portfolio.max_symbol_pct,
         )
+
+    # ----- time stop -----
+
+    def enforce_time_stop(self):
+        """Close positions that have not resolved within the holding window.
+
+        The backtest exits at ``max_hold_bars``; without the same rule live, a
+        trade whose thesis went stale sits there indefinitely and the two paths
+        stop being comparable. A stale swing is also just dead capital in a
+        three-slot book.
+        """
+        if not self.max_hold_days:
+            return []
+        stale = self.portfolio.stale_positions(self.max_hold_days)
+        closed = []
+        for symbol, days in stale:
+            price = self.portfolio.positions.get(symbol, {}).get("price") or 0.0
+            reason = f"時間停損：持有 {days} 天 ≥ {self.max_hold_days} 天未達目標"
+            logger.info(f"⏱️ {symbol} {reason}")
+            self.blotter.log_event("TIME_STOP", symbol=symbol, reason=reason)
+            if not self.auto_trade:
+                closed.append(symbol)
+                continue
+            cancelled = self.ibkr.cancel_orders_for_symbol(symbol)
+            trade = self.ibkr.close_position(symbol, limit_price=None)
+            if trade is None:
+                self.notifier.alert_order_issue(symbol, "時間停損平倉失敗")
+                self.blotter.log_rejection(symbol, "時間停損平倉失敗", stage="EXECUTION")
+                continue
+            self.portfolio.clear_stop(symbol)
+            self.portfolio.clear_entry_date(symbol)
+            self.blotter.log_order(
+                symbol, "SELL", self.portfolio.position_quantity(symbol),
+                getattr(getattr(trade, "order", None), "orderId", None),
+                price, None, None,
+                reason=f"{reason} (取消 {cancelled} 筆掛單)",
+            )
+            closed.append(symbol)
+        return closed
 
     # ----- external app integration -----
 
@@ -1088,6 +1136,7 @@ class TradingBot:
                     self.order_mgr.poll()
                     self.order_mgr.cancel_stale()
                     self.verify_stop_protection()
+                    self.enforce_time_stop()
 
                     may_trade, gate_reason = self.check_gates()
                     regime_label = self.current_regime.regime if self.current_regime else "N/A"

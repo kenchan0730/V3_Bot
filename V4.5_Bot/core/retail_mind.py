@@ -90,6 +90,10 @@ class RetailMind:
             **self.DEFAULTS["tier_bonus"],
             **((config or {}).get("tier_bonus") or {}),
         }
+        broker = (config or {}).get("broker_profile")
+        if broker:
+            self.cfg["commission_per_share"] = broker.commission_per_share
+            self.cfg["commission_minimum"] = broker.commission_minimum
 
     # ----- cost model -----
 

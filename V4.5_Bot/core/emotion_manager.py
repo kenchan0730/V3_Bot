@@ -13,6 +13,7 @@ class EmotionManager:
         self.state = state if state is not None else TradingState()
         self.max_daily_trades = int(cfg.get("max_daily_trades", max_daily_trades))
         self.max_loss_streak = int(cfg.get("max_loss_streak", max_loss_streak))
+        self.block_on_loss_streak = bool(cfg.get("block_on_loss_streak", False))
         self.monthly_loss = 0.0
 
     @property
@@ -39,7 +40,7 @@ class EmotionManager:
         self.state.today_trades += 1
 
     def check_before_trade(self):
-        if self.state.consecutive_losses >= self.max_loss_streak:
+        if self.block_on_loss_streak and self.state.consecutive_losses >= self.max_loss_streak:
             return False, f"連續 {self.state.consecutive_losses} 次止蝕，強制休息"
         if self.state.today_trades >= self.max_daily_trades:
             return False, f"今日已交易 {self.state.today_trades} 次，暫停"

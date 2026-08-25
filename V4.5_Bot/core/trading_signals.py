@@ -154,6 +154,9 @@ class TradingSignals:
         strong_names = sorted(name for name, e in edges.items() if e["strong"])
         passed_count = sum(1 for e in edges.values() if e["passed"])
 
+        target_r = float(swing_cfg.get("target_r_multiple", 1.5))
+        target2_r = float(swing_cfg.get("target2_r_multiple", target_r * 2))
+
         def _buy_payload(action, track):
             entry = candle["entry"] or price + 0.01
             stop = candle["stop"] or price - (price * 0.02)
@@ -164,8 +167,8 @@ class TradingSignals:
                 "track": track,
                 "entry": round(entry, 2),
                 "stop": round(stop, 2),
-                "target1": round(entry + risk * 1.5, 2),
-                "target2": round(entry + risk * 3.0, 2),
+                "target1": round(entry + risk * target_r, 2),
+                "target2": round(entry + risk * target2_r, 2),
                 "confidence": confidence,
                 "confidence_label": _label(confidence),
                 "confluence_score": confluence,
