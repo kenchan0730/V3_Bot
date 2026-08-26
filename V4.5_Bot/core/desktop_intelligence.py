@@ -73,7 +73,7 @@ class DesktopIntelligence:
 
     def __init__(self, config: dict[str, Any] | None = None):
         cfg = config or {}
-        self.api_key = cfg.get("finnhub_key") or os.environ.get("FINNHUB_API_KEY", "")
+        self.api_key = cfg.get("finnhub_key") or os.environ.get("FINNHUB_API_KEY") or os.environ.get("FINNHUB_KEY") or ""
         self.regime = RegimeDetector(cfg.get("regime"))
         self._cache: list[IntelligenceItem] = []
         self._last_poll = 0.0

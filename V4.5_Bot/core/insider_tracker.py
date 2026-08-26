@@ -99,7 +99,9 @@ class InsiderTracker:
         self.api_key = (
             cfg.get("finnhub_key")
             or cfg.get("api_key")
-            or os.environ.get("FINNHUB_API_KEY", "")
+            or os.environ.get("FINNHUB_API_KEY")
+            or os.environ.get("FINNHUB_KEY")
+            or ""
         )
         self.universe = list(cfg.get("universe") or self.DEFAULT_UNIVERSE)
         self._client = None

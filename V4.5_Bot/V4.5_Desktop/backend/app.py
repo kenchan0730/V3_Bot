@@ -434,7 +434,7 @@ def ai_signals(force: bool = False):
 @app.get("/api/search")
 def search_symbols(q: str = Query(..., min_length=1), limit: int = 20):
     results: list[dict[str, Any]] = []
-    api_key = os.environ.get("FINNHUB_API_KEY", "")
+    api_key = os.environ.get("FINNHUB_API_KEY") or os.environ.get("FINNHUB_KEY") or ""
     if api_key:
         try:
             import finnhub
