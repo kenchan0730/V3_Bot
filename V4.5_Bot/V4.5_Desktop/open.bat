@@ -9,6 +9,13 @@ set PORT=8765
 set URL=http://127.0.0.1:%PORT%
 set PYTHONPATH=%ROOT%
 
+if not exist "%ROOT%\data\.env" (
+  if exist "%ROOT%\data\.env.example" (
+    copy /Y "%ROOT%\data\.env.example" "%ROOT%\data\.env" >nul
+    echo 已建立 data\.env（可編輯填入 FINNHUB_KEY）
+  )
+)
+
 echo ========================================
 echo   V4.5 Intelligence Desktop
 echo ========================================
