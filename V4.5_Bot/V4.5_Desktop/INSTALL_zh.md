@@ -47,6 +47,42 @@ npm --version
 
 ## 三、第一次設定（約 5 分鐘）
 
+### 🪟 Windows 用戶（請看這段）
+
+在 **命令提示字元（cmd）** 或 **PowerShell** 中操作（不要用 Mac/Linux 的 `cp` 指令）。
+
+**一鍵首次設定（推薦）**
+
+1. 進入 `V4.5_Bot` 資料夾（ZIP 解壓後的路徑）
+2. **雙擊** `V4.5_Desktop\setup.bat`
+3. 完成後 **雙擊** `V4.5_Desktop\open.bat`
+
+**手動設定（命令提示字元 cmd）**
+
+```cmd
+cd 你的路徑\V4.5_Bot
+
+python -m pip install -r requirements.txt
+python -m pip install -r V4.5_Desktop\requirements.txt
+
+copy data\.env.example data\.env
+
+notepad data\.env
+```
+
+在記事本填入（Finnhub 可選）：
+
+```env
+FINNHUB_KEY=你的金鑰
+TOTAL_CAPITAL=1275.0
+```
+
+儲存後雙擊 `V4.5_Desktop\open.bat` 啟動。
+
+---
+
+### Mac / Linux 用戶
+
 ### 步驟 1：進入專案目錄
 
 ```bash
@@ -66,10 +102,17 @@ Windows 若 `python3` 無效，改用 `python`。
 
 ### 步驟 3：（可選）設定 API 金鑰
 
-複製環境變數範本：
+**Mac / Linux** 複製環境變數範本：
 
 ```bash
 cp data/.env.example data/.env
+```
+
+**Windows** 請用：
+
+```cmd
+copy data\.env.example data\.env
+notepad data\.env
 ```
 
 編輯 `data/.env`，填入（可選，但建議）：
@@ -86,7 +129,11 @@ TOTAL_CAPITAL=1275.0
 
 ## 四、打開應用程式
 
-### 🟢 最簡單：一鍵啟動（Mac / Linux）
+### 🟢 最簡單：一鍵啟動
+
+**Windows**：雙擊 `V4.5_Desktop\open.bat`（首次請先雙擊 `setup.bat`）
+
+**Mac / Linux**：
 
 ```bash
 cd V4.5_Bot
