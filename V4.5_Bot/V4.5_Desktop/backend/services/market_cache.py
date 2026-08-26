@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
+import requests
 import yfinance as yf
 
 from core.data_utils import normalize_columns
@@ -70,6 +71,30 @@ def _empty_quote(symbol: str) -> dict[str, Any]:
 
 def _finnhub_key() -> str:
     return os.environ.get("FINNHUB_API_KEY") or os.environ.get("FINNHUB_KEY") or ""
+
+
+def _alpaca_headers() -> Optional[dict[str, str]]:
+    key = (
+        os.environ.get("ALPACA_API_KEY")
+        or os.environ.get("APCA_API_KEY_ID")
+        or ""
+    )
+    secret = (
+        os.environ.get("ALPACA_API_SECRET")
+        or os.environ.get("ALPACA_SECRET_KEY")
+        or os.environ.get("APCA_API_SECRET_KEY")
+        or ""
+    )
+    if not key or not secret:
+        return None
+    return {
+        "APCA-API-KEY-ID": key,
+        "APCA-API-SECRET-KEY": secret,
+    }
+
+
+def _period_days(period: str) -> int:
+    return {"6mo": 183, "1y": 365, "2y": 730}.get(period, 730)
 
 
 def _get_finnhub():
@@ -154,8 +179,6 @@ def quote_one(symbol: str) -> dict[str, Any]:
     q = _quote_finnhub(sym)
     if q:
         return q
-    if _finnhub_key():
-        return _empty_quote(sym)
     return _quote_yfinance_history(sym) or _empty_quote(sym)
 
 
@@ -172,11 +195,29 @@ def batch_quotes(symbols: list[str], max_workers: int = 1) -> dict[str, dict[str
     return out
 
 
+def _rows_from_history(hist) -> list[dict[str, Any]]:
+    if hist is None or hist.empty:
+        return []
+    df = normalize_columns(hist)
+    ohlcv: list[dict[str, Any]] = []
+    for idx, row in df.iterrows():
+        ts = idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
+        ohlcv.append({
+            "time": ts,
+            "open": round(float(row["open"]), 4),
+            "high": round(float(row["high"]), 4),
+            "low": round(float(row["low"]), 4),
+            "close": round(float(row["close"]), 4),
+            "volume": float(row.get("volume", 0) or 0),
+        })
+    return ohlcv
+
+
 def _fetch_ohlcv_finnhub(symbol: str, period: str = "2y") -> list[dict[str, Any]]:
     client = _get_finnhub()
     if not client:
         return []
-    days = {"6mo": 183, "1y": 365, "2y": 730}.get(period, 730)
+    days = _period_days(period)
     end = int(datetime.now().timestamp())
     start = int((datetime.now() - timedelta(days=days)).timestamp())
     try:
@@ -195,44 +236,92 @@ def _fetch_ohlcv_finnhub(symbol: str, period: str = "2y") -> list[dict[str, Any]
             })
         return ohlcv
     except Exception as exc:
-        logger.debug("finnhub candles %s: %s", symbol, exc)
+        logger.debug("finnhub candles %s (%s): %s", symbol, period, exc)
         return []
 
 
-def fetch_ohlcv(symbol: str, period: str = "2y") -> list[dict[str, Any]]:
-    sym = symbol.upper()
-    rows = _fetch_ohlcv_finnhub(sym, period)
-    if rows:
-        return rows
-    if _finnhub_key():
+def _fetch_ohlcv_alpaca(symbol: str, period: str = "2y") -> list[dict[str, Any]]:
+    headers = _alpaca_headers()
+    if not headers:
         return []
-    yf_sym = _yf_symbol(sym)
+    days = _period_days(period)
+    data_url = os.environ.get("ALPACA_DATA_URL", "https://data.alpaca.markets").rstrip("/")
+    start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    params = {
+        "timeframe": "1Day",
+        "start": start,
+        "limit": 10000,
+        "adjustment": "split",
+    }
+    try:
+        resp = requests.get(
+            f"{data_url}/v2/stocks/{symbol.upper()}/bars",
+            headers=headers,
+            params=params,
+            timeout=20,
+        )
+        resp.raise_for_status()
+        bars = (resp.json() or {}).get("bars") or []
+        if not bars:
+            return []
+        ohlcv: list[dict[str, Any]] = []
+        for bar in bars:
+            ts = str(bar.get("t") or "")[:10]
+            if not ts:
+                continue
+            ohlcv.append({
+                "time": ts,
+                "open": round(float(bar["o"]), 4),
+                "high": round(float(bar["h"]), 4),
+                "low": round(float(bar["l"]), 4),
+                "close": round(float(bar["c"]), 4),
+                "volume": float(bar.get("v") or 0),
+            })
+        return ohlcv
+    except Exception as exc:
+        logger.debug("alpaca candles %s (%s): %s", symbol, period, exc)
+        return []
+
+
+def _fetch_ohlcv_yfinance(symbol: str, period: str = "2y") -> list[dict[str, Any]]:
+    yf_sym = _yf_symbol(symbol)
 
     def _load():
         return yf.Ticker(yf_sym).history(period=period, interval="1d", auto_adjust=True)
 
     try:
         hist = throttled(_load)
-        if hist is None or hist.empty:
+        if (hist is None or hist.empty) and period != "6mo":
             hist = throttled(lambda: yf.Ticker(yf_sym).history(period="6mo", interval="1d", auto_adjust=True))
-        if hist is None or hist.empty:
-            return []
-        df = normalize_columns(hist)
-        ohlcv = []
-        for idx, row in df.iterrows():
-            ts = idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
-            ohlcv.append({
-                "time": ts,
-                "open": round(float(row["open"]), 4),
-                "high": round(float(row["high"]), 4),
-                "low": round(float(row["low"]), 4),
-                "close": round(float(row["close"]), 4),
-                "volume": float(row.get("volume", 0) or 0),
-            })
-        return ohlcv
+        return _rows_from_history(hist)
     except Exception as exc:
-        logger.warning("ohlcv %s failed: %s", sym, exc)
+        logger.warning("yfinance ohlcv %s (%s) failed: %s", symbol, period, exc)
         return []
+
+
+def fetch_ohlcv(symbol: str, period: str = "2y") -> list[dict[str, Any]]:
+    sym = symbol.upper()
+    periods = [period]
+    for fallback in ("6mo", "1y", "2y"):
+        if fallback not in periods:
+            periods.append(fallback)
+
+    if _finnhub_key():
+        for p in periods:
+            rows = _fetch_ohlcv_finnhub(sym, p)
+            if rows:
+                return rows
+
+    for p in periods:
+        rows = _fetch_ohlcv_alpaca(sym, p)
+        if rows:
+            return rows
+
+    for p in periods:
+        rows = _fetch_ohlcv_yfinance(sym, p)
+        if rows:
+            return rows
+    return []
 
 
 def etf_snapshot(symbol: str, name: str) -> Optional[dict[str, Any]]:
@@ -240,7 +329,10 @@ def etf_snapshot(symbol: str, name: str) -> Optional[dict[str, Any]]:
     if q["price"] <= 0:
         return None
     spark = [q["price"]]
-    if not _finnhub_key():
+    ohlcv = fetch_ohlcv(symbol, period="6mo")
+    if ohlcv:
+        spark = [float(bar["close"]) for bar in ohlcv[-20:]] or spark
+    else:
         hist = _ticker_history(symbol, "5d")
         if hist is not None and not hist.empty:
             df = normalize_columns(hist)

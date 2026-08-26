@@ -277,7 +277,9 @@ def _prefetch_watchlist_charts():
         key = f"ohlcv:{sym.upper()}"
         if ohlcv_cache.get(key):
             continue
-        ohlcv_cache.set(key, fetch_ohlcv(sym, period="2y"))
+        rows = fetch_ohlcv(sym, period="2y")
+        if rows:
+            ohlcv_cache.set(key, rows)
         time.sleep(1.2)
 
 
@@ -317,17 +319,24 @@ def warmup_cache():
 def health():
     finnhub_ok = bool(_news_cfg.get("finnhub_key"))
     sample = quote_one("AAPL") if finnhub_ok else _empty_quote("AAPL")
+    sample_ohlcv = fetch_ohlcv("AAPL", period="6mo") if finnhub_ok else []
     return {
         "status": "ok",
         "mode": "intelligence-only",
         "auto_trade": False,
         "finnhub": finnhub_ok,
         "finnhub_live": finnhub_ok and sample.get("price", 0) > 0,
+        "ohlcv_live": len(sample_ohlcv) > 0,
         "sample_aapl": sample,
+        "sample_aapl_bars": len(sample_ohlcv),
         "data_hint": (
             "Add FINNHUB_KEY=your_key to data/.env and restart API."
             if not finnhub_ok or sample.get("price", 0) <= 0
-            else None
+            else (
+                "Finnhub quotes OK but K-line empty — OHLCV now falls back to Alpaca/yfinance after restart."
+                if not sample_ohlcv
+                else None
+            )
         ),
     }
 
@@ -396,7 +405,12 @@ def symbol_detail(symbol: str, analyze: bool = False):
             data = fetch_ohlcv(sym, period="6mo")
         return data
 
-    ohlcv = ohlcv_cache.get_or_set(f"ohlcv:{sym}", load_ohlcv)
+    cache_key = f"ohlcv:{sym}"
+    ohlcv = ohlcv_cache.get(cache_key)
+    if ohlcv is None:
+        ohlcv = load_ohlcv()
+        if ohlcv:
+            ohlcv_cache.set(cache_key, ohlcv)
     quote = _quote_snapshot(sym)
     news = intelligence.get_symbol_news(sym)
     cached_f = fund_cache.get(f"f:{sym}")
