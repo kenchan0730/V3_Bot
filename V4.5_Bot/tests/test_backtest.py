@@ -91,6 +91,19 @@ def test_engine_check_exit_timeout():
     assert reason == "TIMEOUT" and price == 10.5
 
 
+def test_engine_check_exit_breakeven():
+    engine = BacktestEngine(
+        {**CONFIG, "swing_trading": {"breakeven_after_r": 0.75}},
+    )
+    bar = pd.Series({"low": 9.8, "high": 10.85, "close": 10.0})
+    trade = {
+        "entry": 10.0, "stop": 9.0, "original_stop": 9.0,
+        "target": 11.5, "index": 0, "breakeven_after_r": 0.75,
+    }
+    price, reason = engine._check_exit(bar, trade, 1)
+    assert reason == "BREAKEVEN" and price == 10.0
+
+
 def test_engine_check_exit_none():
     engine = BacktestEngine(CONFIG, max_hold_bars=50)
     bar = pd.Series({"low": 10.0, "high": 11.0, "close": 10.5})

@@ -17,8 +17,11 @@ CONFIG = {
     "trading": {"price_limit": 1000, "max_shares": 100},
     "zscore": {"best_zone_min": 0.5},
     "execution": {"slippage_ticks": 1, "tick_size": 0.01},
+    # These tests target the cost model and the mind approval chain, so the
+    # retail and pacing layers are held out; they have their own tests.
     "backtest": {"apply_costs": True, "commission_per_share": 0.005,
-                 "commission_minimum": 1.0, "exit_slippage_ticks": 1},
+                 "commission_minimum": 1.0, "exit_slippage_ticks": 1,
+                 "use_retail_mind": False, "use_pacing": False},
 }
 
 
@@ -147,9 +150,40 @@ def test_zero_conviction_blocks_entry():
     assert result.mind_rejections > 0
 
 
-def test_mind_failure_does_not_break_backtest():
+def test_mind_failure_rejects_entries_not_fail_open():
+    """Mind exceptions must reject entries (E1) — backtest must not silently approve."""
     result = _run(BacktestEngine(
         CONFIG, initial_capital=10000.0, max_hold_bars=10, professional_mind=_Exploding(),
     ))
-    assert isinstance(result.summary(), dict)
-    assert result.trades
+    assert result.trades == []
+    assert result.mind_rejections > 0
+
+
+# ----- retail / pacing layers -----
+
+RETAIL_CONFIG = {
+    **CONFIG,
+    "backtest": {**CONFIG["backtest"], "use_retail_mind": True},
+}
+
+
+def test_retail_layer_filters_and_is_counted():
+    plain = _run(BacktestEngine(CONFIG, initial_capital=10000.0, max_hold_bars=10))
+    retail = _run(BacktestEngine(RETAIL_CONFIG, initial_capital=10000.0, max_hold_bars=10))
+    assert len(retail.trades) <= len(plain.trades)
+    assert retail.summary()["retail_rejections"] >= 0
+
+
+def test_summary_reports_monthly_frequency():
+    summary = _run(BacktestEngine(CONFIG, initial_capital=10000.0, max_hold_bars=10)).summary()
+    assert summary["trades_per_month"] > 0
+
+
+def test_pacing_hard_cap_limits_trade_count():
+    capped = BacktestEngine(
+        {**CONFIG, "backtest": {**CONFIG["backtest"], "use_pacing": True},
+         "trade_pacing": {"target_trades_per_month": 1, "max_trades_per_month": 1}},
+        initial_capital=10000.0, max_hold_bars=10, pacing_target=1,
+    )
+    uncapped = BacktestEngine(CONFIG, initial_capital=10000.0, max_hold_bars=10)
+    assert len(_run(capped).trades) <= len(_run(uncapped).trades)

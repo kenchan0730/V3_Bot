@@ -3,6 +3,7 @@ single-name concentration, plus optional correlation-based exposure reduction.
 """
 
 import logging
+from datetime import date
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,10 @@ class Portfolio:
 
         # symbol -> {"quantity", "avg_cost", "price", "market_value", "stop"}
         self.positions = {}
+        # Stop prices recorded before broker fill (survives pre-position set_stop).
+        self.intended_stops = {}
+        # symbol -> ISO date of first entry, for the time stop.
+        self.entry_dates = {}
 
     # ----- state sync -----
 
@@ -53,25 +58,86 @@ class Portfolio:
             if quantity == 0:
                 continue
             price = float(prices.get(symbol, avg_cost) or avg_cost)
-            existing_stop = self.positions.get(symbol, {}).get("stop")
+            existing_stop = (
+                self.positions.get(symbol, {}).get("stop")
+                or self.intended_stops.get(symbol)
+            )
             merged[symbol] = {
                 "quantity": quantity,
                 "avg_cost": avg_cost,
                 "price": price,
                 "market_value": abs(quantity) * price,
                 "stop": existing_stop,
+                "entry_date": (
+                    self.positions.get(symbol, {}).get("entry_date")
+                    or self.entry_dates.get(symbol)
+                ),
             }
         self.positions = merged
+        for symbol in list(self.entry_dates):
+            if symbol not in merged:
+                self.entry_dates.pop(symbol, None)
         return self.positions
 
-    def set_stop(self, symbol, stop_price):
+    def record_intended_stop(self, symbol, stop_price):
+        """Remember stop before fill so protection checks can re-arm."""
+        if not stop_price or stop_price <= 0:
+            return
+        self.intended_stops[symbol] = float(stop_price)
         if symbol in self.positions:
-            self.positions[symbol]["stop"] = stop_price
+            self.positions[symbol]["stop"] = float(stop_price)
+
+    def set_stop(self, symbol, stop_price):
+        self.record_intended_stop(symbol, stop_price)
+
+    # ----- time stop -----
+
+    def record_entry_date(self, symbol, when=None):
+        """First-entry date, used by the time stop. Re-entries do not reset it."""
+        if symbol in self.entry_dates:
+            return self.entry_dates[symbol]
+        stamp = (when or date.today()).isoformat()
+        self.entry_dates[symbol] = stamp
+        if symbol in self.positions:
+            self.positions[symbol]["entry_date"] = stamp
+        return stamp
+
+    def clear_entry_date(self, symbol):
+        self.entry_dates.pop(symbol, None)
+        if symbol in self.positions:
+            self.positions[symbol].pop("entry_date", None)
+
+    def holding_days(self, symbol, today=None):
+        """Calendar days held, or ``None`` when the entry date is unknown."""
+        stamp = self.entry_dates.get(symbol) or self.positions.get(symbol, {}).get("entry_date")
+        if not stamp:
+            return None
+        try:
+            entered = date.fromisoformat(str(stamp)[:10])
+        except ValueError:
+            return None
+        return max(0, ((today or date.today()) - entered).days)
+
+    def stale_positions(self, max_days, today=None):
+        """Open positions past the time stop: [(symbol, days_held), ...]."""
+        if not max_days or max_days <= 0:
+            return []
+        stale = []
+        for symbol in self.positions:
+            days = self.holding_days(symbol, today=today)
+            if days is not None and days >= int(max_days):
+                stale.append((symbol, days))
+        return sorted(stale, key=lambda item: -item[1])
+
+    def clear_stop(self, symbol):
+        self.intended_stops.pop(symbol, None)
+        if symbol in self.positions:
+            self.positions[symbol].pop("stop", None)
 
     @property
     def stops(self):
-        """Known stop price per held symbol, for protection re-arming."""
-        result = {}
+        """Known stop price per symbol (held or pending), for protection re-arming."""
+        result = dict(self.intended_stops)
         for symbol, pos in self.positions.items():
             stop = pos.get("stop")
             if stop:
@@ -215,6 +281,7 @@ class Portfolio:
                     "price": round(pos["price"], 2),
                     "market_value": round(pos["market_value"], 2),
                     "stop": pos.get("stop"),
+                    "entry_date": pos.get("entry_date") or self.entry_dates.get(symbol),
                 }
                 for symbol, pos in self.positions.items()
             },

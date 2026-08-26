@@ -34,6 +34,18 @@ def test_strategic_cash_on_risk_off(mind):
     assert mind.strategic_cash_mode is True
 
 
+def test_strategic_cash_clears_on_regime_recovery(mind):
+    risk_off = RegimeResult(regime=RISK_OFF, score=30, exposure_pct=25, allow_new_entries=False)
+    mind.deliberate_cycle(risk_off, _FakePortfolio(), 1000, watchlist_len=5)
+    assert mind.strategic_cash_mode is True
+
+    from core.regime import NEUTRAL
+    recovered = RegimeResult(regime=NEUTRAL, score=55, exposure_pct=100, allow_new_entries=True)
+    decision = mind.deliberate_cycle(recovered, _FakePortfolio(), 1000, watchlist_len=5)
+    assert mind.strategic_cash_mode is False
+    assert decision.approve is True
+
+
 def test_rejects_distribution_phase(mind, df, monkeypatch):
     monkeypatch.setattr(
         "core.market_structure.classify_phase",

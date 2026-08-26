@@ -1,0 +1,69 @@
+# Trader-facing pattern guide (中文). Rule detection lives in core/candle_patterns.py.
+
+patterns:
+  鎚頭:
+    direction: bullish
+    definition: 小实体、长下影线（约为实体两倍）、上影线极短；常见于下跌末段。
+    entry_stop: 突破锤头高点进，停损在锤头低点下方。
+    fake_signals:
+      - 无量锤头（成交量未放大）
+      - 下跌趋势未缓和就出现的锤头
+    trader_tip: 最好等下一根阳线确认再进。
+
+  看漲吞噬:
+    direction: bullish
+    definition: 第二根阳线完全包住前一根阴线实体。
+    entry_stop: 收盘上方进，停损在吞噬组合最低下方。
+    fake_signals:
+      - 发生在横盘中部而非支撑区
+      - 大盘 regime 为 RISK_OFF 时成功率下降
+    trader_tip: 配合 MA20>MA50 趋势结构更可靠。
+
+  晨星:
+    direction: bullish
+    definition: 大阴 + 小实体（星） + 大阳收复前阴一半以上。
+    entry_stop: 第三根收盘上方进，停损在星线低点下方。
+    fake_signals:
+      - 星线实体过大，不是典型转折
+      - 第三根成交量萎缩
+    trader_tip: 三星组合比单根锤头更可信。
+
+  射擊之星:
+    direction: bearish
+    definition: 小实体、长上影线，上影约为实体两倍。
+    entry_stop: 跌破实体低点出，停损在上影高点上方。
+    fake_signals:
+      - 强势上涨中的浅回调上影（可能只是续涨）
+    trader_tip: 在阻力位比在新高更有效。
+
+  看跌吞噬:
+    direction: bearish
+    definition: 第二根阴线完全包住前一根阳线实体。
+    entry_stop: 收盘下方出，停损在组合最高上方。
+    fake_signals:
+      - 下跌末段出现的吞噬（可能是诱空）
+    trader_tip: 配合 STRONG_SELL 或平多，唔好逆勢抄底。
+
+  黃昏星:
+    direction: bearish
+    definition: 大阳 + 小星 + 大阴跌破前阳一半以下。
+    entry_stop: 第三根收盘下方出，停损在星线高点上方。
+    fake_signals:
+      - 星线带长下影（多空犹豫，信号弱）
+    trader_tip: 与晨星对称，适合保护利润。
+
+  十字星:
+    direction: neutral
+    definition: 开收接近，实体极细，多空平衡。
+    entry_stop: 需看下一根确认方向；单独出现唔好落单。
+    fake_signals:
+      - 低波动横盘中的十字星（无信息）
+    trader_tip: 蜻蜓/墓碑十字星才有方向暗示。
+
+  "（蜻蜓）":
+    direction: bullish
+    definition: 十字星且下影明显长于上影。
+    entry_stop: 同锤头逻辑，突破高点进。
+    fake_signals:
+      - 与锤头同根 K 线双重标注时，以较强 driver 为准
+    trader_tip: bot 会以 strength 最高者作为 entry/stop 来源。

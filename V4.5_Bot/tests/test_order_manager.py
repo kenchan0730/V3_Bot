@@ -287,3 +287,84 @@ def test_snapshot_lists_orders(manager):
     manager.track(1, "AVAH", "BUY", 10, trade=make_trade())
     manager.track(2, "QXO", "BUY", 5, trade=make_trade("QXO"))
     assert len(manager.snapshot()) == 2
+
+
+class HydrateIBKR:
+    def get_open_orders(self):
+        parent = make_trade("AVAH", status="Submitted", filled=0)
+        parent.order.orderId = 100
+        parent.order.parentId = 0
+        parent.order.orderType = "LMT"
+        parent.order.lmtPrice = 12.0
+
+        stop = make_trade("AVAH", status="Submitted", filled=0)
+        stop.order.orderId = 101
+        stop.order.action = "SELL"
+        stop.order.parentId = 100
+        stop.order.orderType = "STP"
+        stop.order.auxPrice = 11.0
+
+        return [parent, stop]
+
+
+def test_hydrate_from_broker():
+    manager = OrderManager(ibkr=HydrateIBKR())
+    added = manager.hydrate_from_broker()
+    assert added == 2
+    assert manager.orders[100].role == "entry"
+    assert manager.orders[101].role == "stop_loss"
+    assert manager.orders[101].stop == 11.0
+
+
+def test_hydrate_syncs_partial_entry_children():
+    class PartialHydrateIBKR:
+        def get_open_orders(self):
+            parent = make_trade("AVAH", status="Submitted", filled=3)
+            parent.order.orderId = 100
+            parent.order.parentId = 0
+            parent.order.orderType = "LMT"
+            parent.order.lmtPrice = 12.0
+            parent.orderStatus.filled = 3
+
+            stop = make_trade("AVAH", status="Submitted", filled=0)
+            stop.order.orderId = 101
+            stop.order.action = "SELL"
+            stop.order.parentId = 100
+            stop.order.orderType = "STP"
+            stop.order.auxPrice = 11.0
+            stop.order.totalQuantity = 5
+
+            return [parent, stop]
+
+    ibkr = PartialHydrateIBKR()
+    ibkr.modify_order_quantity = lambda trade, qty: True
+    manager = OrderManager(ibkr=ibkr)
+    manager.hydrate_from_broker()
+    assert manager.orders[101].quantity == 3
+
+
+class ModifyIBKR(HydrateIBKR):
+    def __init__(self):
+        self.modified = []
+
+    def modify_order_quantity(self, trade, quantity):
+        self.modified.append((getattr(trade.order, "orderId", None), quantity))
+        return True
+
+
+def test_poll_syncs_bracket_children_on_partial_fill():
+    ibkr = ModifyIBKR()
+    manager = OrderManager(ibkr=ibkr)
+    entry_trade = make_trade(filled=3, avg_price=12.0)
+    entry_trade.order.orderId = 7
+    stop_trade = make_trade()
+    stop_trade.order.orderId = 9
+    stop_trade.order.action = "SELL"
+
+    manager.track(7, "AVAH", "BUY", 5, role="entry", parent_id=None, trade=entry_trade)
+    manager.track(9, "AVAH", "SELL", 5, role="stop_loss", parent_id=7, trade=stop_trade)
+
+    updates = manager.poll()
+    assert updates[0]["filled_qty"] == 3
+    assert manager.orders[9].quantity == 3
+    assert ibkr.modified == [(9, 3)]

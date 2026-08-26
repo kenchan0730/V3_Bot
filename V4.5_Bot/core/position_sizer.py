@@ -12,6 +12,15 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
+def scale_shares(shares, factor, min_shares=0):
+    """Down-scale share count; live trading uses min_shares=1, backtest uses 0."""
+    if factor >= 1.0:
+        return int(shares)
+    floor = max(0, int(min_shares))
+    scaled = int(int(shares) * factor)
+    return max(floor, scaled) if floor else max(0, scaled)
+
+
 def compute_atr(df, period=14):
     """Average True Range on a lowercase OHLCV frame."""
     if df is None or len(df) < period + 1:
