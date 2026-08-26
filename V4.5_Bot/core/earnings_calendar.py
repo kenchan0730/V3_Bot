@@ -131,7 +131,47 @@ class EarningsCalendar:
         if not items and symbol:
             items.extend(self._yfinance_earnings(symbol))
 
+        if not items and not symbol:
+            items.extend(self._scan_popular_earnings(from_date, to_date))
+
         return items
+
+    _SCAN_SYMBOLS = [
+        "AAPL", "MSFT", "NVDA", "GOOGL", "META", "AMZN", "TSLA", "AMD",
+        "NFLX", "CRM", "ORCL", "ADBE", "INTC", "QCOM", "AVGO", "JPM",
+        "BAC", "WMT", "COST", "UNH", "LLY", "XOM", "CVX", "PLTR",
+    ]
+
+    def _scan_popular_earnings(self, from_date: str, to_date: str) -> list[dict[str, Any]]:
+        """Fallback when Finnhub market calendar unavailable."""
+        out: list[dict[str, Any]] = []
+        try:
+            fd = datetime.strptime(from_date, "%Y-%m-%d").date()
+            td = datetime.strptime(to_date, "%Y-%m-%d").date()
+        except ValueError:
+            return out
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def scan_one(sym: str) -> list[dict[str, Any]]:
+            rows: list[dict[str, Any]] = []
+            for item in self._yfinance_earnings(sym):
+                try:
+                    ed = datetime.strptime(str(item.get("date", ""))[:10], "%Y-%m-%d").date()
+                except ValueError:
+                    continue
+                if fd <= ed <= td:
+                    rows.append(item)
+            return rows
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futs = [pool.submit(scan_one, sym) for sym in self._SCAN_SYMBOLS]
+            for fut in as_completed(futs):
+                try:
+                    out.extend(fut.result())
+                except Exception as exc:
+                    logger.debug("earnings scan failed: %s", exc)
+        out.sort(key=lambda x: x.get("date", ""))
+        return out
 
     def fetch_day(self, date: str) -> list[dict[str, Any]]:
         return self.fetch_range(date, date)

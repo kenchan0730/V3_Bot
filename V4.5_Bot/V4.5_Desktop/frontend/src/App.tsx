@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { api } from './api/client'
+import { DataProvider } from './context/DataContext'
 import { IntelligencePage, SymbolDetailModal } from './pages/Intelligence'
 import { TechnicalPage } from './pages/Technical'
 import { InsiderPage } from './pages/Insider'
@@ -18,7 +19,7 @@ const NAV: { id: Tab; label: string; icon: string }[] = [
   { id: 'search', label: '搜尋', icon: '⌕' },
 ]
 
-export default function App() {
+function AppInner() {
   const [tab, setTab] = useState<Tab>('intel')
   const [symbol, setSymbol] = useState<string | null>(null)
 
@@ -35,14 +36,24 @@ export default function App() {
       </header>
 
       <main className="app-main">
-        {tab === 'intel' && <IntelligencePage onSelectSymbol={setSymbol} />}
-        {tab === 'technical' && <TechnicalPage />}
-        {tab === 'insider' && <InsiderPage />}
-        {tab === 'calendar' && <CalendarPage />}
-        {tab === 'ai' && <AIPage />}
-        {tab === 'search' && (
+        <div style={{ display: tab === 'intel' ? 'block' : 'none' }}>
+          <IntelligencePage onSelectSymbol={setSymbol} />
+        </div>
+        <div style={{ display: tab === 'technical' ? 'block' : 'none' }}>
+          <TechnicalPage />
+        </div>
+        <div style={{ display: tab === 'insider' ? 'block' : 'none' }}>
+          <InsiderPage />
+        </div>
+        <div style={{ display: tab === 'calendar' ? 'block' : 'none' }}>
+          <CalendarPage />
+        </div>
+        <div style={{ display: tab === 'ai' ? 'block' : 'none' }}>
+          <AIPage />
+        </div>
+        <div style={{ display: tab === 'search' ? 'block' : 'none' }}>
           <SearchPage onSelectSymbol={setSymbol} onAddWatchlist={addWatchlist} />
-        )}
+        </div>
       </main>
 
       <nav className="nav-bar">
@@ -60,5 +71,13 @@ export default function App() {
 
       <SymbolDetailModal symbol={symbol} onClose={() => setSymbol(null)} />
     </div>
+  )
+}
+
+export default function App() {
+  return (
+    <DataProvider>
+      <AppInner />
+    </DataProvider>
   )
 }

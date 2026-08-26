@@ -285,9 +285,18 @@ class DesktopIntelligence:
         return [i.to_dict() for i in items[:limit]]
 
     def get_headlines(self, limit: int = 20) -> list[dict[str, Any]]:
-        """Only extreme scores: 1-2 or 9-10."""
+        """Extreme scores (1-2, 9-10); fallback to highest-impact news."""
         items = self.poll()
         extreme = [i for i in items if i.score <= 2 or i.score >= 9]
+        if len(extreme) < 3:
+            ranked = sorted(items, key=lambda x: (x.impact, abs(x.score - 5)), reverse=True)
+            seen = {i.headline for i in extreme}
+            for item in ranked:
+                if item.headline not in seen:
+                    extreme.append(item)
+                    seen.add(item.headline)
+                if len(extreme) >= limit:
+                    break
         return [i.to_dict() for i in extreme[:limit]]
 
     def get_hot_trends(self, limit: int = 20) -> list[dict[str, Any]]:

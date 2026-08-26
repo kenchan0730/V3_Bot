@@ -19,11 +19,12 @@ async function del<T>(path: string): Promise<T> {
 }
 
 export const api = {
+  bootstrap: () => get<BootstrapPayload>('/bootstrap'),
   intelligenceFeed: (limit = 50) => get<{ items: NewsItem[]; updated_at: string }>(`/intelligence/feed?limit=${limit}`),
   watchlist: () => get<{ symbols: string[]; items: QuoteRow[] }>('/intelligence/watchlist'),
   addWatchlist: (symbol: string) => post<{ symbols: string[] }>(`/intelligence/watchlist/${symbol}`),
   removeWatchlist: (symbol: string) => del<{ symbols: string[] }>(`/intelligence/watchlist/${symbol}`),
-  symbolDetail: (symbol: string) => get<SymbolDetail>(`/intelligence/symbol/${symbol}`),
+  symbolDetail: (symbol: string) => get<SymbolDetail>(`/intelligence/symbol/${symbol}?analyze=false`),
   technical: () => get<TechnicalOverview>('/technical/overview'),
   insider: (date?: string, sort = 'composite') =>
     get<InsiderSummary>(`/insider/summary?sort=${sort}${date ? `&date=${date}` : ''}`),
@@ -57,6 +58,16 @@ export interface NewsItem {
   quotes?: QuoteRow[]
   rank?: number
   article_count?: number
+}
+
+export interface BootstrapPayload {
+  feed: NewsItem[]
+  watchlist: { symbols: string[]; items: QuoteRow[] }
+  technical: TechnicalOverview
+  earnings_today?: EarningsItem[]
+  earnings_week?: EarningsItem[]
+  trends: NewsItem[]
+  updated_at: string
 }
 
 export interface SymbolDetail {
@@ -104,6 +115,9 @@ export interface TechnicalOverview {
     name: string
     change_pct: number
     vs_spy: number
+    lead_stock?: string
+    lead_price?: number
+    lead_change_pct?: number
   }>
   headlines: NewsItem[]
   fundamentals_hot: Array<QuoteRow & { tier: string; tier_label: string; metrics: Record<string, unknown> }>

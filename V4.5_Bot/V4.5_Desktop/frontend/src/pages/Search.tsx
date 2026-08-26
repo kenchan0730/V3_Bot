@@ -1,17 +1,14 @@
-import { useEffect, useState } from 'react'
-import { api, NewsItem, SearchResult } from '../api/client'
+import { useState } from 'react'
+import { api, SearchResult } from '../api/client'
+import { useData } from '../context/DataContext'
 
 export function SearchPage({ onSelectSymbol, onAddWatchlist }: {
   onSelectSymbol: (s: string) => void
   onAddWatchlist: (s: string) => void
 }) {
+  const { trends } = useData()
   const [q, setQ] = useState('')
   const [results, setResults] = useState<SearchResult[]>([])
-  const [trends, setTrends] = useState<NewsItem[]>([])
-
-  useEffect(() => {
-    api.trends().then((r) => setTrends(r.trends)).catch(console.error)
-  }, [])
 
   const search = async () => {
     if (!q.trim()) return
@@ -45,12 +42,17 @@ export function SearchPage({ onSelectSymbol, onAddWatchlist }: {
 
       <h3 style={{ margin: '24px 0 12px' }}>熱門趨勢</h3>
       {trends.map((t) => (
-        <div className="card" key={t.headline.slice(0, 30)}>
+        <div
+          className="card card-clickable"
+          key={t.headline.slice(0, 30)}
+          onClick={() => t.url && window.open(t.url, '_blank', 'noopener')}
+          style={{ cursor: t.url ? 'pointer' : 'default' }}
+        >
           <div className="meta">#{t.rank ?? '—'} · {t.article_count ?? 1} 篇相關</div>
           <p className="headline">{t.headline}</p>
           {t.symbols?.length > 0 && (
-            <div className="ticker-row">
-              {t.symbols.slice(0, 4).map((s) => (
+            <div className="ticker-row" onClick={(e) => e.stopPropagation()}>
+              {t.symbols.slice(0, 4).map((s: string) => (
                 <span className="ticker-chip" key={s} onClick={() => onSelectSymbol(s)}>{s}</span>
               ))}
             </div>
