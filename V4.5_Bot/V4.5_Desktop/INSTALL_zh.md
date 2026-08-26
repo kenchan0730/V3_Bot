@@ -32,16 +32,19 @@ git checkout cursor/v45-desktop-intelligence-16b9
 
 | 軟體 | 用途 | 下載 |
 |------|------|------|
-| **Python 3.10+** | 後端 API | https://www.python.org/downloads/ |
+| **Python 3.11**（必須） | 後端 API | https://www.python.org/downloads/release/python-3119/ |
 | **Node.js 18+** | 前端建置（首次） | https://nodejs.org/ |
 
 安裝後在終端機確認：
 
-```bash
-python3 --version    # 或 Windows: python --version
+**Windows（必須是 3.11）：**
+
+```cmd
+py -3.11 --version
 node --version
-npm --version
 ```
+
+若顯示 `Python 3.11.x` 即正確。若 `py -3.11` 失敗，請重裝 Python 3.11 並勾選 **Add Python to PATH** 和 **Install launcher for all users**。
 
 ---
 
