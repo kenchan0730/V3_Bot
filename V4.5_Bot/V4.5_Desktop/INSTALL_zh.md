@@ -77,6 +77,19 @@ TOTAL_CAPITAL=1275.0
 
 - 會在**桌面**建立「V4.5 Intelligence」捷徑
 - 可選 **Y** → 加入**開機自動啟動**
+- 若仍看不到捷徑，腳本會改在桌面建立 **「V4.5 Intelligence (雙擊啟動).bat」**
+
+**手動建立捷徑（若腳本失敗）：**
+
+1. 在桌面按右鍵 → **新增** → **捷徑**
+2. 位置填入（改成你的實際路徑）：
+   ```
+   C:\Users\你的用戶名\Desktop\V3_Bot-cursor-v45-desktop-intelligence-16b9\V4.5_Bot\V4.5_Desktop\open.bat
+   ```
+3. 名稱：`V4.5 Intelligence`
+4. 完成
+
+> 桌面若在 **OneDrive**，捷徑會出現在 OneDrive 的 Desktop 資料夾，不是本機 Desktop。
 
 ---
 
