@@ -304,6 +304,7 @@ def warmup_cache():
             _build_bootstrap()
             bootstrap_cache.set("bootstrap", _build_bootstrap())
             _prefetch_watchlist_charts()
+            threading.Thread(target=analyzer.warm_signals, daemon=True).start()
             logger.info("Desktop cache warmed")
         except Exception as exc:
             logger.warning("warmup failed: %s", exc)
@@ -456,36 +457,85 @@ def calendar_earnings_detail(symbol: str, date: Optional[str] = None):
     return earnings_cal.get_detail(symbol.upper(), date)
 
 
+def _extract_symbols(text: str) -> list[str]:
+    import re
+    cleaned = re.sub(r"[^\w\s]", " ", text.upper())
+    return [t for t in cleaned.split() if 1 <= len(t) <= 5 and t.isalpha()]
+
+
 @app.get("/api/ai/chat")
 def ai_chat(q: str = Query(..., min_length=1)):
-    q_lower = q.lower()
-    symbols = [t for t in q.upper().replace(",", " ").split() if len(t) <= 5 and t.isalpha()]
-    if not symbols:
-        symbols = _load_watchlist()[:3]
-    regime = RegimeDetector(CONFIG.get("regime")).detect()
-    answer_parts = [f"市場環境：{regime.regime}（分數 {regime.score:.0f}/100）。"]
-    for sym in symbols[:2]:
-        qd = _quote_snapshot(sym)
-        answer_parts.append(f"{sym}：現價 ${qd['price']}，今日 {qd['change_pct']:+.2f}%。")
-    signals = analyzer.get_signals()
-    if "買" in q or "buy" in q_lower:
-        if signals:
-            answer_parts.append("V4.5 訊號：")
-            for s in signals[:5]:
-                answer_parts.append(f"  • {s['symbol']} {s.get('action')} @ ${s.get('price')}")
-        else:
-            answer_parts.append("目前 watchlist 無強烈買入訊號。")
-    return {
-        "question": q,
-        "answer": "\n".join(answer_parts),
-        "signals": signals,
-        "regime": regime.to_dict(),
-    }
+    try:
+        q_lower = q.lower().strip().strip('"').strip("'")
+        symbols = _extract_symbols(q)
+        if not symbols:
+            symbols = _load_watchlist()[:3]
+        regime = RegimeDetector(CONFIG.get("regime")).detect()
+        answer_parts = [f"市場環境：{regime.regime}（分數 {regime.score:.0f}/100）。"]
+        for sym in symbols[:2]:
+            qd = _quote_snapshot(sym)
+            answer_parts.append(f"{sym}：現價 ${qd['price']}，今日 {qd['change_pct']:+.2f}%。")
+            cached_f = fund_cache.get(f"f:{sym}")
+            if cached_f:
+                answer_parts.append(
+                    f"  基本面等級 {cached_f.get('tier', '—')}：{cached_f.get('tier_label', '')}"
+                )
+            elif qd["price"] > 0:
+                try:
+                    view = fundamental.assess(sym).to_dict()
+                    fund_cache.set(f"f:{sym}", view)
+                    answer_parts.append(
+                        f"  基本面等級 {view.get('tier', '—')}：{view.get('tier_label', '')}"
+                    )
+                except Exception as exc:
+                    logger.debug("fund assess %s: %s", sym, exc)
+
+        wants_signals = any(
+            kw in q_lower for kw in ("買", "buy", "訊號", "signal", "可以買", "值得")
+        )
+        signals: list[dict[str, Any]] = []
+        if wants_signals:
+            signals = analyzer.get_signals(init_if_needed=False)
+            if signals:
+                answer_parts.append("V4.5 訊號：")
+                for s in signals[:5]:
+                    answer_parts.append(
+                        f"  • {s['symbol']} {s.get('action') or s.get('verdict')} @ ${s.get('price')}"
+                    )
+            elif not analyzer._initialized:
+                answer_parts.append("V4.5 訊號載入中（首次約需 1 分鐘，請稍後再問「買入訊號」）。")
+            else:
+                answer_parts.append("目前 watchlist 無強烈買入訊號。")
+
+        return {
+            "question": q,
+            "answer": "\n".join(answer_parts),
+            "signals": signals,
+            "regime": regime.to_dict(),
+        }
+    except Exception as exc:
+        logger.exception("ai_chat failed")
+        raise HTTPException(500, f"AI 分析失敗：{exc}") from exc
 
 
 @app.get("/api/ai/signals")
 def ai_signals(force: bool = False):
-    return {"signals": analyzer.get_signals(force=force), "updated_at": datetime.now().isoformat()}
+    try:
+        if force:
+            signals = analyzer.get_signals(force=True, init_if_needed=True)
+        else:
+            signals = analyzer.get_signals(init_if_needed=False)
+            if not signals and not analyzer._initialized:
+                import threading
+                threading.Thread(target=analyzer.warm_signals, daemon=True).start()
+        return {"signals": signals, "updated_at": datetime.now().isoformat()}
+    except Exception as exc:
+        logger.exception("ai_signals failed")
+        return {
+            "signals": [],
+            "updated_at": datetime.now().isoformat(),
+            "notice": f"訊號載入失敗：{exc}",
+        }
 
 
 @app.get("/api/search")

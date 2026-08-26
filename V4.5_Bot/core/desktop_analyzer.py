@@ -100,12 +100,17 @@ class DesktopAnalyzer:
         self._ensure_bot()
         return self._bot.analyze_watchlist()
 
-    def get_signals(self, force: bool = False) -> list[dict[str, Any]]:
+    def get_signals(
+        self, force: bool = False, init_if_needed: bool = True
+    ) -> list[dict[str, Any]]:
         """Buy/watch signals — cached, limited to top watchlist names."""
         if not force and self._signal_cache:
             ts, data = self._signal_cache
             if (time.time() - ts) < SIGNAL_CACHE_TTL:
                 return data
+
+        if not init_if_needed and not self._initialized:
+            return []
 
         self._ensure_bot()
         watchlist = list(self._bot.watchlist[:MAX_DESKTOP_WATCHLIST_ANALYSIS])
@@ -134,3 +139,10 @@ class DesktopAnalyzer:
                 })
         self._signal_cache = (time.time(), signals)
         return signals
+
+    def warm_signals(self) -> None:
+        """Background warmup — safe to call from a daemon thread."""
+        try:
+            self.get_signals(force=True, init_if_needed=True)
+        except Exception as exc:
+            logger.warning("signal warmup failed: %s", exc)

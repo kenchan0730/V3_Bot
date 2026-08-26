@@ -8,8 +8,9 @@ export function AIPage() {
   const [loading, setLoading] = useState(false)
 
   useEffect(() => {
-    api.aiSignals().then((r) => setSignals(r.signals)).catch(console.error)
-    const t = setInterval(() => api.aiSignals().then((r) => setSignals(r.signals)), 300000)
+    const loadSignals = () => api.aiSignals().then((r) => setSignals(r.signals)).catch(console.error)
+    loadSignals()
+    const t = setInterval(loadSignals, 60000)
     return () => clearInterval(t)
   }, [])
 
