@@ -5,17 +5,23 @@ from core.sector_tracker import SectorTracker
 
 
 def patch_download(monkeypatch, performance_by_symbol, error_symbols=()):
-    """Fake yf.download returning a 2-bar frame implying a given % move."""
+    """Fake yfinance Ticker.history returning a 2-bar frame implying a given % move."""
 
-    def fake_download(symbol, period=None, interval=None, progress=None):
-        if symbol in error_symbols:
-            raise RuntimeError("download failed")
-        change = performance_by_symbol.get(symbol, 0.0)
-        start = 100.0
-        end = start * (1 + change / 100)
-        return pd.DataFrame({"Close": [start, end]})
+    class FakeTicker:
+        def __init__(self, symbol):
+            self.ticker = symbol
 
-    monkeypatch.setattr("core.sector_tracker.yf.download", fake_download)
+        def history(self, period=None, interval=None, auto_adjust=True):
+            symbol = self.ticker
+            if symbol in error_symbols:
+                raise RuntimeError("download failed")
+            change = performance_by_symbol.get(symbol, 0.0)
+            start = 100.0
+            end = start * (1 + change / 100)
+            return pd.DataFrame({"Close": [start, end]})
+
+    monkeypatch.setattr("core.sector_tracker.yf.Ticker", FakeTicker)
+    monkeypatch.setattr("core.yf_throttle.throttled", lambda fn, *a, **k: fn(*a, **k))
 
 
 def test_relative_strength_against_spy(monkeypatch):
@@ -73,23 +79,42 @@ def test_weights_are_floored_at_fifty(monkeypatch):
 def test_handles_multiindex_columns(monkeypatch):
     """yfinance >=1.0 returns MultiIndex columns; scalars must still be derived."""
 
-    def fake_download(symbol, period=None, interval=None, progress=None):
-        columns = pd.MultiIndex.from_product([["Close", "Open"], [symbol]])
-        return pd.DataFrame([[100.0, 100.0], [102.0, 101.0]], columns=columns)
+    class FakeTicker:
+        def __init__(self, symbol):
+            self.ticker = symbol
 
-    monkeypatch.setattr("core.sector_tracker.yf.download", fake_download)
+        def history(self, period=None, interval=None, auto_adjust=True):
+            columns = pd.MultiIndex.from_product([["Close", "Open"], [self.ticker]])
+            return pd.DataFrame([[100.0, 100.0], [102.0, 101.0]], columns=columns)
+
+    monkeypatch.setattr("core.sector_tracker.yf.Ticker", FakeTicker)
+    monkeypatch.setattr("core.yf_throttle.throttled", lambda fn, *a, **k: fn(*a, **k))
     relative = SectorTracker.get_relative_strength("5d")
     assert relative["Technology"] == pytest.approx(0.0, abs=0.01)
 
 
 def test_handles_empty_frame(monkeypatch):
-    monkeypatch.setattr("core.sector_tracker.yf.download",
-                        lambda *a, **k: pd.DataFrame())
+    class FakeTicker:
+        def __init__(self, symbol):
+            self.ticker = symbol
+
+        def history(self, period=None, interval=None, auto_adjust=True):
+            return pd.DataFrame()
+
+    monkeypatch.setattr("core.sector_tracker.yf.Ticker", FakeTicker)
+    monkeypatch.setattr("core.yf_throttle.throttled", lambda fn, *a, **k: fn(*a, **k))
     relative = SectorTracker.get_relative_strength("5d")
     assert all(value == 0 for value in relative.values())
 
 
 def test_period_return_handles_zero_first_price(monkeypatch):
-    monkeypatch.setattr("core.sector_tracker.yf.download",
-                        lambda *a, **k: pd.DataFrame({"Close": [0.0, 10.0]}))
+    class FakeTicker:
+        def __init__(self, symbol):
+            self.ticker = symbol
+
+        def history(self, period=None, interval=None, auto_adjust=True):
+            return pd.DataFrame({"Close": [0.0, 10.0]})
+
+    monkeypatch.setattr("core.sector_tracker.yf.Ticker", FakeTicker)
+    monkeypatch.setattr("core.yf_throttle.throttled", lambda fn, *a, **k: fn(*a, **k))
     assert SectorTracker._period_return_pct("XLK", "5d") is None

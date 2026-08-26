@@ -56,7 +56,13 @@ class SectorTracker:
     @staticmethod
     def _period_return_pct(symbol, period):
         try:
-            raw = yf.download(symbol, period=period, interval="1d", progress=False)
+            from core.yf_throttle import throttled
+            import yfinance as yf
+
+            def _load():
+                return yf.Ticker(symbol).history(period=period, interval="1d", auto_adjust=True)
+
+            raw = throttled(_load)
             if raw is None or len(raw) < 2:
                 return None
             df = normalize_columns(raw)
@@ -71,7 +77,7 @@ class SectorTracker:
                 return None
             return (last / first - 1) * 100
         except Exception as exc:
-            logger.warning("%s 期間報酬計算失敗: %s", symbol, exc)
+            logger.warning("%s period return failed: %s", symbol, exc)
             return None
 
     @staticmethod

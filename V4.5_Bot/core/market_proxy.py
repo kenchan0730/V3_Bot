@@ -1,11 +1,6 @@
-"""Free macro proxies via yfinance — no Polygon/Tiingo required.
-
-Combines SPY trend, VIX level/term, credit stress (HYG/LQD), and growth tilt
-(QQQ/SPY) into a single snapshot for regime detection.
-"""
+"""Free macro proxies — throttled yfinance with graceful fallback."""
 
 import logging
-from functools import lru_cache
 from time import time
 
 import pandas as pd
@@ -14,7 +9,7 @@ import yfinance as yf
 logger = logging.getLogger(__name__)
 
 _CACHE = {}
-_CACHE_TTL = 300  # 5 minutes
+_CACHE_TTL = 300
 
 
 def _cached(key, loader, ttl=_CACHE_TTL):
@@ -29,7 +24,12 @@ def _cached(key, loader, ttl=_CACHE_TTL):
 
 def _history(ticker, period="6mo", interval="1d"):
     try:
-        df = yf.download(ticker, period=period, interval=interval, progress=False)
+        from core.yf_throttle import throttled
+
+        def _load():
+            return yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=True)
+
+        df = throttled(_load)
         if df is None or df.empty:
             return None
         if isinstance(df.columns, pd.MultiIndex):
@@ -37,7 +37,7 @@ def _history(ticker, period="6mo", interval="1d"):
         close_col = "Close" if "Close" in df.columns else "close"
         return df[close_col].dropna()
     except Exception as exc:
-        logger.warning(f"market_proxy {ticker} failed: {exc}")
+        logger.debug("market_proxy %s failed: %s", ticker, exc)
         return None
 
 

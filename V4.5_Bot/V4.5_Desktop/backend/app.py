@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
@@ -37,6 +38,9 @@ from services.market_cache import (
     quote_one,
     sector_rows,
 )
+from core.yf_throttle import silence_yfinance_logs
+
+silence_yfinance_logs()
 
 logger = logging.getLogger(__name__)
 
@@ -93,9 +97,7 @@ TOP_ETFS = [
 
 INTERNAL_UNIVERSE = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "JPM",
-    "V", "UNH", "XOM", "LLY", "JNJ", "WMT", "MA", "PG", "AVGO",
-    "HD", "CVX", "MRK", "ABBV", "COST", "AMD", "INTC", "NFLX",
-    "CRM", "ORCL", "IBM", "GS", "BAC", "PLTR", "MU", "MRVL",
+    "V", "UNH", "XOM", "AMD", "NFLX", "PLTR", "MU",
 ]
 
 
@@ -159,29 +161,18 @@ def _company_name(symbol: str) -> str:
     cached = name_cache.get(f"n:{sym}")
     if cached:
         return cached
-    try:
-        info = __import__("yfinance").Ticker(sym).info
-        name = str(info.get("shortName") or info.get("longName") or sym)
-    except Exception:
-        name = sym
-    name_cache.set(f"n:{sym}", name)
-    return name
+    name_cache.set(f"n:{sym}", sym)
+    return sym
 
 
 def _build_technical() -> dict[str, Any]:
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
     breadth = MarketBreadth.get_breadth_score()
     regime = RegimeDetector(CONFIG.get("regime")).detect(
         breadth_score=breadth.get("score", 50)
     )
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        etf_fut = pool.submit(batch_etf_snapshots, TOP_ETFS)
-        sector_fut = pool.submit(sector_rows)
-        quotes_fut = pool.submit(_cached_quotes, INTERNAL_UNIVERSE)
-        etf_rows = etf_fut.result()
-        sectors = sector_fut.result()
-        quotes = quotes_fut.result()
+    quotes = _cached_quotes(INTERNAL_UNIVERSE)
+    etf_rows = batch_etf_snapshots(TOP_ETFS)
+    sectors = sector_rows()
     advancing = declining = unchanged = 0
     for sym in INTERNAL_UNIVERSE:
         pct = (quotes.get(sym) or {}).get("change_pct", 0)
@@ -192,44 +183,29 @@ def _build_technical() -> dict[str, Any]:
         else:
             unchanged += 1
     total = max(1, advancing + declining + unchanged)
-    hot_symbols = ["NVDA", "AMD", "SMCI", "PLTR", "META", "TSLA", "COIN", "HOOD", "MU", "MRVL"]
+    hot_symbols = ["NVDA", "AMD", "PLTR", "META", "TSLA", "MU", "MRVL"]
     hot_quotes = _cached_quotes(hot_symbols)
-
-    def _fund_row(sym: str) -> dict[str, Any]:
+    fundamentals_hot: list[dict[str, Any]] = []
+    for sym in hot_symbols:
         q = hot_quotes.get(sym) or _quote_snapshot(sym)
         cached_f = fund_cache.get(f"f:{sym}")
         if cached_f:
             view = cached_f
         else:
-            view = fundamental.assess(sym).to_dict()
-            fund_cache.set(f"f:{sym}", view)
-        return {
+            try:
+                view = fundamental.assess(sym).to_dict()
+                fund_cache.set(f"f:{sym}", view)
+            except Exception as exc:
+                logger.debug("fund assess %s: %s", sym, exc)
+                view = {"tier": "B", "tier_label": "", "metrics": {}}
+            time.sleep(0.3)
+        fundamentals_hot.append({
             "symbol": sym,
             **q,
             "tier": view.get("tier", "B"),
             "tier_label": view.get("tier_label", ""),
             "metrics": view.get("metrics", {}),
-        }
-
-    fundamentals_hot: list[dict[str, Any]] = []
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        futs = {pool.submit(_fund_row, sym): sym for sym in hot_symbols}
-        rows_by_sym: dict[str, dict[str, Any]] = {}
-        for fut in as_completed(futs):
-            sym = futs[fut]
-            try:
-                rows_by_sym[sym] = fut.result()
-            except Exception as exc:
-                logger.debug("fund row %s: %s", sym, exc)
-                q = hot_quotes.get(sym) or _quote_snapshot(sym)
-                rows_by_sym[sym] = {
-                    "symbol": sym,
-                    **q,
-                    "tier": "B",
-                    "tier_label": "",
-                    "metrics": {},
-                }
-        fundamentals_hot = [rows_by_sym[s] for s in hot_symbols if s in rows_by_sym]
+        })
     return {
         "market_environment": {
             "score": round(regime.score, 1),
@@ -292,6 +268,7 @@ def _prefetch_watchlist_charts():
         if ohlcv_cache.get(key):
             continue
         ohlcv_cache.set(key, fetch_ohlcv(sym, period="2y"))
+        time.sleep(1.2)
 
 
 @app.on_event("startup")
@@ -301,10 +278,11 @@ def warmup_cache():
     def _warm():
         try:
             intelligence.poll(force=True)
-            _build_bootstrap()
-            bootstrap_cache.set("bootstrap", _build_bootstrap())
-            _prefetch_watchlist_charts()
-            threading.Thread(target=analyzer.warm_signals, daemon=True).start()
+            feed = feed_cache.get_or_set("feed", lambda: intelligence.get_feed(limit=50))
+            wl = _load_watchlist()
+            _cached_quotes(wl)
+            payload = _build_bootstrap()
+            bootstrap_cache.set("bootstrap", payload)
             logger.info("Desktop cache warmed")
         except Exception as exc:
             logger.warning("warmup failed: %s", exc)
@@ -319,6 +297,11 @@ def health():
         "mode": "intelligence-only",
         "auto_trade": False,
         "finnhub": bool(_news_cfg.get("finnhub_key")),
+        "data_hint": (
+            "Set FINNHUB_KEY in data/.env for reliable quotes when Yahoo rate-limits."
+            if not _news_cfg.get("finnhub_key")
+            else None
+        ),
     }
 
 

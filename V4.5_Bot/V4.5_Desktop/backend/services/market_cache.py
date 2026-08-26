@@ -5,16 +5,17 @@ from __future__ import annotations
 import logging
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 import yfinance as yf
 
 from core.data_utils import normalize_columns
+from core.yf_throttle import silence_yfinance_logs, throttled
 
+silence_yfinance_logs()
 logger = logging.getLogger(__name__)
 
-# Sector ETF -> representative leading stock
 SECTOR_LEAD_STOCKS = {
     "XLK": ("Technology", "AAPL"),
     "XLE": ("Energy", "XOM"),
@@ -28,6 +29,9 @@ SECTOR_LEAD_STOCKS = {
     "XLB": ("Materials", "LIN"),
     "XLRE": ("Real Estate", "PLD"),
 }
+
+_finnhub_client: Any = None
+FINNHUB_GAP = 1.05
 
 
 class TTLCache:
@@ -68,14 +72,29 @@ def _finnhub_key() -> str:
     return os.environ.get("FINNHUB_API_KEY") or os.environ.get("FINNHUB_KEY") or ""
 
 
-def _quote_finnhub(symbol: str) -> Optional[dict[str, Any]]:
+def _get_finnhub():
+    global _finnhub_client
+    if _finnhub_client is not None:
+        return _finnhub_client
     key = _finnhub_key()
     if not key:
         return None
     try:
         import finnhub
 
-        q = finnhub.Client(api_key=key).quote(symbol.upper())
+        _finnhub_client = finnhub.Client(api_key=key)
+    except Exception as exc:
+        logger.debug("finnhub init: %s", exc)
+        return None
+    return _finnhub_client
+
+
+def _quote_finnhub(symbol: str) -> Optional[dict[str, Any]]:
+    client = _get_finnhub()
+    if not client:
+        return None
+    try:
+        q = client.quote(symbol.upper())
         price = float(q.get("c") or 0)
         if price <= 0:
             return None
@@ -96,64 +115,104 @@ def _yf_symbol(symbol: str) -> str:
     return "BRK-B" if sym == "BRK.B" else sym
 
 
-def _quote_yfinance_history(symbol: str) -> Optional[dict[str, Any]]:
+def _ticker_history(symbol: str, period: str = "5d"):
     sym = _yf_symbol(symbol)
+
+    def _load():
+        return yf.Ticker(sym).history(period=period, interval="1d", auto_adjust=True)
+
     try:
-        ticker = yf.Ticker(sym)
-        hist = ticker.history(period="5d", interval="1d", auto_adjust=True)
-        if hist is None or hist.empty:
-            hist = ticker.history(period="1mo", interval="1d", auto_adjust=True)
-        if hist is None or hist.empty:
-            return None
-        df = normalize_columns(hist)
-        closes = df["close"]
-        if hasattr(closes, "columns"):
-            closes = closes.iloc[:, 0]
-        last = float(closes.iloc[-1])
-        prev = float(closes.iloc[-2]) if len(closes) > 1 else last
-        chg = ((last - prev) / prev * 100) if prev else 0.0
-        return {
-            "symbol": symbol.upper(),
-            "price": round(last, 2),
-            "change_pct": round(chg, 2),
-            "direction": "up" if chg >= 0 else "down",
-        }
+        return throttled(_load)
     except Exception as exc:
         logger.debug("yfinance history %s: %s", symbol, exc)
         return None
 
 
+def _quote_yfinance_history(symbol: str) -> Optional[dict[str, Any]]:
+    hist = _ticker_history(symbol, "5d")
+    if hist is None or hist.empty:
+        hist = _ticker_history(symbol, "1mo")
+    if hist is None or hist.empty:
+        return None
+    df = normalize_columns(hist)
+    closes = df["close"]
+    if hasattr(closes, "columns"):
+        closes = closes.iloc[:, 0]
+    last = float(closes.iloc[-1])
+    prev = float(closes.iloc[-2]) if len(closes) > 1 else last
+    chg = ((last - prev) / prev * 100) if prev else 0.0
+    return {
+        "symbol": symbol.upper(),
+        "price": round(last, 2),
+        "change_pct": round(chg, 2),
+        "direction": "up" if chg >= 0 else "down",
+    }
+
+
 def quote_one(symbol: str) -> dict[str, Any]:
     sym = symbol.upper()
-    q = _quote_finnhub(sym) or _quote_yfinance_history(sym)
-    return q or _empty_quote(sym)
+    q = _quote_finnhub(sym)
+    if q:
+        return q
+    if _finnhub_key():
+        time.sleep(FINNHUB_GAP)
+    return _quote_yfinance_history(sym) or _empty_quote(sym)
 
 
-def batch_quotes(symbols: list[str], max_workers: int = 10) -> dict[str, dict[str, Any]]:
+def batch_quotes(symbols: list[str], max_workers: int = 1) -> dict[str, dict[str, Any]]:
     unique = list(dict.fromkeys(s.upper() for s in symbols if s))
     if not unique:
         return {}
     out: dict[str, dict[str, Any]] = {}
-    workers = min(max_workers, max(1, len(unique)))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(quote_one, sym): sym for sym in unique}
-        for fut in as_completed(futures):
-            sym = futures[fut]
-            try:
-                out[sym] = fut.result()
-            except Exception as exc:
-                logger.debug("batch quote %s: %s", sym, exc)
-                out[sym] = _empty_quote(sym)
+    has_fh = bool(_finnhub_key())
     for sym in unique:
-        out.setdefault(sym, _empty_quote(sym))
+        out[sym] = quote_one(sym)
+        if has_fh and out[sym]["price"] <= 0:
+            time.sleep(FINNHUB_GAP)
     return out
+
+
+def _fetch_ohlcv_finnhub(symbol: str, period: str = "2y") -> list[dict[str, Any]]:
+    client = _get_finnhub()
+    if not client:
+        return []
+    days = {"6mo": 183, "1y": 365, "2y": 730}.get(period, 730)
+    end = int(datetime.now().timestamp())
+    start = int((datetime.now() - timedelta(days=days)).timestamp())
+    try:
+        data = client.stock_candles(symbol.upper(), "D", start, end)
+        if not data or data.get("s") != "ok":
+            return []
+        ohlcv = []
+        for i, ts in enumerate(data.get("t") or []):
+            ohlcv.append({
+                "time": datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d"),
+                "open": round(float(data["o"][i]), 4),
+                "high": round(float(data["h"][i]), 4),
+                "low": round(float(data["l"][i]), 4),
+                "close": round(float(data["c"][i]), 4),
+                "volume": float(data["v"][i]),
+            })
+        return ohlcv
+    except Exception as exc:
+        logger.debug("finnhub candles %s: %s", symbol, exc)
+        return []
 
 
 def fetch_ohlcv(symbol: str, period: str = "2y") -> list[dict[str, Any]]:
     sym = symbol.upper()
+    rows = _fetch_ohlcv_finnhub(sym, period)
+    if rows:
+        return rows
     yf_sym = _yf_symbol(sym)
+
+    def _load():
+        return yf.Ticker(yf_sym).history(period=period, interval="1d", auto_adjust=True)
+
     try:
-        hist = yf.Ticker(yf_sym).history(period=period, interval="1d", auto_adjust=True)
+        hist = throttled(_load)
+        if hist is None or hist.empty:
+            hist = throttled(lambda: yf.Ticker(yf_sym).history(period="6mo", interval="1d", auto_adjust=True))
         if hist is None or hist.empty:
             return []
         df = normalize_columns(hist)
@@ -178,60 +237,49 @@ def etf_snapshot(symbol: str, name: str) -> Optional[dict[str, Any]]:
     q = quote_one(symbol)
     if q["price"] <= 0:
         return None
-    try:
-        hist = yf.Ticker(symbol).history(period="5d", interval="1d", auto_adjust=True)
-        spark: list[float] = []
-        if hist is not None and not hist.empty:
-            df = normalize_columns(hist)
-            closes = df["close"]
-            if hasattr(closes, "columns"):
-                closes = closes.iloc[:, 0]
-            spark = [float(x) for x in closes.tail(20).tolist()]
-        return {
-            "symbol": symbol,
-            "name": name,
-            "price": q["price"],
-            "change_pct": q["change_pct"],
-            "sparkline": spark,
-        }
-    except Exception:
-        return {
-            "symbol": symbol,
-            "name": name,
-            "price": q["price"],
-            "change_pct": q["change_pct"],
-            "sparkline": [q["price"]],
-        }
+    spark: list[float] = []
+    hist = _ticker_history(symbol, "5d")
+    if hist is not None and not hist.empty:
+        df = normalize_columns(hist)
+        closes = df["close"]
+        if hasattr(closes, "columns"):
+            closes = closes.iloc[:, 0]
+        spark = [float(x) for x in closes.tail(20).tolist()]
+    if not spark:
+        spark = [q["price"]]
+    return {
+        "symbol": symbol,
+        "name": name,
+        "price": q["price"],
+        "change_pct": q["change_pct"],
+        "sparkline": spark,
+    }
 
 
 def batch_etf_snapshots(pairs: list[tuple[str, str]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        futs = [pool.submit(etf_snapshot, sym, name) for sym, name in pairs]
-        for fut in as_completed(futs):
-            snap = fut.result()
-            if snap:
-                rows.append(snap)
-    order = {p[0]: i for i, p in enumerate(pairs)}
-    rows.sort(key=lambda r: order.get(r["symbol"], 99))
+    for sym, name in pairs:
+        snap = etf_snapshot(sym, name)
+        if snap:
+            rows.append(snap)
     return rows
 
 
 def sector_rows() -> list[dict[str, Any]]:
-    """Sector ETF performance + leading stock quote."""
-    from core.sector_tracker import SectorTracker
-
-    rel = SectorTracker.get_relative_strength("5d")
-    etf_quotes = batch_quotes(list(SECTOR_LEAD_STOCKS.keys()) + [s[1] for s in SECTOR_LEAD_STOCKS.values()])
+    """Sector performance from live quotes (Finnhub-first, no bulk yf.download)."""
+    symbols = list(SECTOR_LEAD_STOCKS.keys()) + [s[1] for s in SECTOR_LEAD_STOCKS.values()]
+    quotes = batch_quotes(symbols)
+    spy_chg = float((quotes.get("SPY") or _empty_quote("SPY"))["change_pct"])
     rows: list[dict[str, Any]] = []
     for etf, (name, lead) in SECTOR_LEAD_STOCKS.items():
-        perf = SectorTracker._period_return_pct(etf, "5d")
-        lead_q = etf_quotes.get(lead) or _empty_quote(lead)
+        etf_q = quotes.get(etf) or _empty_quote(etf)
+        lead_q = quotes.get(lead) or _empty_quote(lead)
+        chg = float(etf_q["change_pct"] or lead_q["change_pct"])
         rows.append({
             "symbol": etf,
             "name": name,
-            "change_pct": round(float(perf or lead_q["change_pct"]), 2),
-            "vs_spy": round(float(rel.get(name, 0)), 2),
+            "change_pct": round(chg, 2),
+            "vs_spy": round(chg - spy_chg, 2),
             "lead_stock": lead,
             "lead_price": lead_q["price"],
             "lead_change_pct": lead_q["change_pct"],
