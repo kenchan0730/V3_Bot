@@ -2,7 +2,7 @@
 # V4.5 Desktop 一鍵啟動（建置前端 + 啟動 API + 開啟瀏覽器）
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DESKTOP="$ROOT/V4.5_Desktop"
 FRONTEND="$DESKTOP/frontend"
 PORT=8765
