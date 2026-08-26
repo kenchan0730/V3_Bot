@@ -84,7 +84,7 @@ TOTAL_CAPITAL=1275.0
 
 ### 🟢 方法一：桌面捷徑（最方便）
 
-雙擊桌面 **「V4.5 Intelligence」** → 自動啟動 API + 開�browser
+雙擊桌面 **「V4.5 Intelligence」** → 自動啟動 API + 開啟瀏覽器
 
 ### 🟢 方法二：直接雙擊 open.bat
 
