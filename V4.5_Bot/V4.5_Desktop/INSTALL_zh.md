@@ -73,11 +73,13 @@ TOTAL_CAPITAL=1275.0
 
 ### 步驟 3：建立捷徑（推薦）
 
-**雙擊** `V4.5_Desktop\create_shortcut.bat`
+**雙擊** `V4.5_Desktop\create_shortcut.bat`（英文介面，避免編碼錯誤）
 
-- 會在**桌面**建立「V4.5 Intelligence」捷徑
-- 可選 **Y** → 加入**開機自動啟動**
-- 若仍看不到捷徑，腳本會改在桌面建立 **「V4.5 Intelligence (雙擊啟動).bat」**
+- 成功後桌面會有 **「V4.5 Intelligence」** 捷徑
+- 問 `Add to Windows Startup?` → 輸入 **Y** 可開機自動啟動
+
+**若仍失敗**，改雙擊 `install_desktop_launcher.bat`  
+→ 桌面會有 **「V4.5 Intelligence (Start).bat」**，雙擊即可啟動。
 
 **手動建立捷徑（若腳本失敗）：**
 
