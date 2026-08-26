@@ -5,12 +5,21 @@ export function InsiderPage() {
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10))
   const [sort, setSort] = useState('composite')
   const [data, setData] = useState<InsiderSummary | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
 
   useEffect(() => {
-    api.insider(date, sort).then(setData).catch(console.error)
+    setLoading(true)
+    setError('')
+    api.insider(date, sort)
+      .then(setData)
+      .catch((e) => setError(String(e)))
+      .finally(() => setLoading(false))
   }, [date, sort])
 
-  if (!data) return <div className="loading">載入內部交易…</div>
+  if (loading && !data) return <div className="loading">載入內部交易…</div>
+  if (error && !data) return <div className="error">{error}</div>
+  if (!data) return null
 
   return (
     <div>
@@ -18,13 +27,14 @@ export function InsiderPage() {
         <h2 style={{ margin: '0 0 12px' }}>內部交易</h2>
         <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
         <div className="meta" style={{ marginTop: 8 }}>Form 4 · 公開市場</div>
+        {data.notice && <div className="meta" style={{ marginTop: 8, color: 'var(--amber)' }}>{data.notice}</div>}
       </div>
 
       <div className="grid-2">
         <div className="stat-card">
           <div className="stat-label">買入</div>
           <div className="stat-value">${(data.buy_value / 1e6).toFixed(2)}M</div>
-          <div className="meta">{data.buy_count} 筆 · {data.buy_count} 檔</div>
+          <div className="meta">{data.buy_count} 筆 · {data.buy_symbols} 檔</div>
         </div>
         <div className="stat-card">
           <div className="stat-label">賣出</div>

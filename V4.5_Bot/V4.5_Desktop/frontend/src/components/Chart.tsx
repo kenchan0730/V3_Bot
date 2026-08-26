@@ -30,14 +30,16 @@ export function CandleChart({ data }: { data: OhlcvBar[] }) {
       wickDownColor: '#ef4444',
     })
 
-    const bars = data.map((b) => ({
-      time: b.time.slice(0, 10) as string,
-      open: b.open,
-      high: b.high,
-      low: b.low,
-      close: b.close,
-    }))
-    series.setData(bars)
+    const bars = data
+      .map((b) => ({
+        time: b.time.slice(0, 10),
+        open: b.open,
+        high: b.high,
+        low: b.low,
+        close: b.close,
+      }))
+      .sort((a, b) => a.time.localeCompare(b.time))
+    series.setData(bars as any)
     chart.timeScale().fitContent()
 
     const onResize = () => {

@@ -156,11 +156,16 @@ class InsiderTracker:
         return out
 
     def _is_high_conviction(self, tx: InsiderTransaction) -> bool:
-        if tx.change is not None and tx.change >= 25:
-            return True
-        if tx.is_buy and tx.change is not None and tx.change > 0:
-            return True
-        return False
+        """≥25% shareholding change, or effectively new position (100%+)."""
+        if tx.change is None:
+            return False
+        try:
+            chg = float(tx.change)
+        except (TypeError, ValueError):
+            return False
+        if not tx.is_buy:
+            return False
+        return chg >= 25 or chg >= 100
 
     def summarize_day(
         self,
@@ -176,13 +181,14 @@ class InsiderTracker:
                     pool.append(s.upper())
 
         all_tx: list[InsiderTransaction] = []
+        if not self._client:
+            return InsiderDaySummary(date=target, transactions=[])
+
+        from_date = (datetime.strptime(target, "%Y-%m-%d") - timedelta(days=3)).strftime("%Y-%m-%d")
         for sym in pool:
-            txs = self.fetch_symbol_transactions(target, target, target)
+            txs = self.fetch_symbol_transactions(sym, target, target)
             if not txs:
-                txs = self.fetch_symbol_transactions(
-                    (datetime.strptime(target, "%Y-%m-%d") - timedelta(days=3)).strftime("%Y-%m-%d"),
-                    target,
-                )
+                txs = self.fetch_symbol_transactions(sym, from_date, target)
             for tx in txs:
                 if tx.transaction_date == target or tx.filing_date == target:
                     all_tx.append(tx)

@@ -116,8 +116,12 @@ export interface InsiderSummary {
   sell_value: number
   buy_count: number
   sell_count: number
+  buy_symbols: number
+  sell_symbols: number
   high_conviction: number
   cluster_buying: number
+  data_available?: boolean
+  notice?: string
   ranking: InsiderTx[]
 }
 

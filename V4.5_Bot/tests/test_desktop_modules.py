@@ -21,17 +21,29 @@ def test_sentiment_to_score_bounds():
 def test_insider_high_conviction():
     tracker = InsiderTracker()
     tx = InsiderTransaction(
-        symbol="TEST",
-        name="John",
-        title="CEO",
-        transaction_date="2026-01-01",
-        transaction_code="P",
-        price=10,
-        shares=100,
-        value=1000,
-        change=30,
+        symbol="TEST", name="John", title="CEO",
+        transaction_date="2026-01-01", transaction_code="P",
+        price=10, shares=100, value=1000, change=30,
     )
     assert tracker._is_high_conviction(tx)
+
+
+def test_insider_summarize_no_client():
+    tracker = InsiderTracker()
+    tracker._client = None
+    summary = tracker.summarize_day("2026-08-25")
+    assert summary.transactions == []
+    assert summary.date == "2026-08-25"
+
+
+def test_insider_high_conviction_not_trivial_buy():
+    tracker = InsiderTracker()
+    tx = InsiderTransaction(
+        symbol="TEST", name="John", title="CEO",
+        transaction_date="2026-01-01", transaction_code="P",
+        price=10, shares=100, value=1000, change=5,
+    )
+    assert not tracker._is_high_conviction(tx)
 
 
 def test_insider_rank():

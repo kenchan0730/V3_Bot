@@ -16,7 +16,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 BOT_ROOT = Path(__file__).resolve().parents[2]
+BACKEND_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(BOT_ROOT))
+sys.path.insert(0, str(BACKEND_ROOT))
 
 from core.data_utils import normalize_columns
 from core.desktop_analyzer import DesktopAnalyzer, _load_config
@@ -25,13 +27,14 @@ from core.earnings_calendar import EarningsCalendar
 from core.fundamental_filter import FundamentalFilter
 from core.insider_tracker import InsiderTracker
 from core.market_breadth import MarketBreadth
-from core.quant_engine import QuantEngine
 from core.regime import RegimeDetector
 from core.sector_tracker import SectorTracker
 
+from services.market_cache import TTLCache, batch_etf_snapshots, batch_quotes
+
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="V4.5 Desktop Intelligence", version="1.0.0")
+app = FastAPI(title="V4.5 Desktop Intelligence", version="1.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -49,6 +52,11 @@ insider_tracker = InsiderTracker(CONFIG.get("news") or {})
 earnings_cal = EarningsCalendar(CONFIG.get("news") or {})
 fundamental = FundamentalFilter((CONFIG.get("fundamental") or {}))
 analyzer = DesktopAnalyzer()
+
+technical_cache = TTLCache(ttl_seconds=180)
+ohlcv_cache = TTLCache(ttl_seconds=600)
+quote_cache = TTLCache(ttl_seconds=60)
+name_cache = TTLCache(ttl_seconds=86400)
 
 TOP_ETFS = [
     ("SPY", "S&P 500"),
@@ -70,7 +78,7 @@ INTERNAL_UNIVERSE = [
     "NFLX", "AMD", "INTC", "QCOM", "TXN", "ORCL", "IBM", "GS", "MS",
     "BAC", "C", "WFC", "BLK", "PLTR", "MU", "MRVL", "CAT", "DE", "BA",
     "RTX", "GE", "HON", "LIN", "SPGI", "TMO", "ISRG", "AMAT", "LRCX",
-    "NKE", "DIS", "CMCSA", "VZ", "T", "PFE", "ABT", "TMO", "DHR", "SYK",
+    "NKE", "DIS", "CMCSA", "VZ", "T", "PFE", "ABT", "DHR", "SYK",
     "LOW", "SBUX", "MCD", "UPS", "FDX", "GM", "F", "UBER", "ABNB", "SNOW",
 ]
 
@@ -102,42 +110,77 @@ def _save_watchlist(symbols: list[str]):
 
 
 def _quote_snapshot(symbol: str) -> dict[str, Any]:
+    sym = symbol.upper()
+    cached = quote_cache.get(f"q:{sym}")
+    if cached:
+        return cached
+    result = batch_quotes([sym]).get(sym) or {
+        "symbol": sym, "price": 0, "change_pct": 0, "direction": "flat",
+    }
+    quote_cache.set(f"q:{sym}", result)
+    return result
+
+
+def _company_name(symbol: str) -> str:
+    sym = symbol.upper()
+    cached = name_cache.get(f"name:{sym}")
+    if cached:
+        return cached
     try:
-        t = yf.Ticker(symbol.upper())
-        info = t.fast_info
-        price = float(info.last_price or info.last_price or 0)
-        prev = float(info.previous_close or price)
-        chg_pct = ((price - prev) / prev * 100) if prev else 0.0
-        return {
-            "symbol": symbol.upper(),
-            "price": round(price, 2),
-            "change_pct": round(chg_pct, 2),
-            "direction": "up" if chg_pct >= 0 else "down",
-        }
+        info = yf.Ticker(sym).info
+        name = str(info.get("shortName") or info.get("longName") or sym)
     except Exception:
-        return {"symbol": symbol.upper(), "price": 0, "change_pct": 0, "direction": "flat"}
+        name = sym
+    name_cache.set(f"name:{sym}", name)
+    return name
+
+
+@app.on_event("startup")
+def warmup_signals():
+    """Background warm-up so first AI tab load is fast."""
+    import threading
+
+    def _warm():
+        try:
+            analyzer.get_signals(force=True)
+        except Exception as exc:
+            logger.debug("warmup signals: %s", exc)
+
+    threading.Thread(target=_warm, daemon=True).start()
 
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "mode": "intelligence-only", "auto_trade": False}
+    return {
+        "status": "ok",
+        "mode": "intelligence-only",
+        "auto_trade": False,
+        "finnhub": bool(os.environ.get("FINNHUB_API_KEY")),
+    }
 
 
 @app.get("/api/intelligence/feed")
 def intelligence_feed(limit: int = 50):
     feed = intelligence.get_feed(limit=limit)
+    symbols = []
+    for item in feed:
+        symbols.extend(item.get("symbols") or [])
+    quotes = batch_quotes(symbols[:40])
     for item in feed:
         if item.get("symbols"):
-            item["quotes"] = [_quote_snapshot(s) for s in item["symbols"][:4]]
+            item["quotes"] = [
+                quotes.get(s, _quote_snapshot(s)) for s in item["symbols"][:4]
+            ]
     return {"items": feed, "updated_at": datetime.now().isoformat()}
 
 
 @app.get("/api/intelligence/watchlist")
 def get_watchlist():
     symbols = _load_watchlist()
+    quotes = batch_quotes(symbols)
     rows = []
     for sym in symbols:
-        q = _quote_snapshot(sym)
+        q = quotes.get(sym) or _quote_snapshot(sym)
         rows.append({**q, "name": sym})
     return {"symbols": symbols, "items": rows}
 
@@ -161,24 +204,34 @@ def remove_watchlist(symbol: str):
 
 
 @app.get("/api/intelligence/symbol/{symbol}")
-def symbol_detail(symbol: str):
+def symbol_detail(symbol: str, analyze: bool = True):
     sym = symbol.upper()
-    try:
-        hist = yf.download(sym, period="max", interval="1d", progress=False)
+    cache_key = f"ohlcv:{sym}"
+
+    def load_ohlcv():
+        hist = yf.download(sym, period="max", interval="1d", progress=False, auto_adjust=True)
         if hist is None or hist.empty:
             raise HTTPException(404, f"No data for {sym}")
         df = normalize_columns(hist)
         ohlcv = []
-        for idx, row in df.tail(2000).iterrows():
-            ts = idx.isoformat() if hasattr(idx, "isoformat") else str(idx)
+        seen: set[str] = set()
+        for idx, row in df.iterrows():
+            ts = idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
+            if ts in seen:
+                continue
+            seen.add(ts)
             ohlcv.append({
                 "time": ts,
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"]),
+                "open": round(float(row["open"]), 4),
+                "high": round(float(row["high"]), 4),
+                "low": round(float(row["low"]), 4),
+                "close": round(float(row["close"]), 4),
                 "volume": float(row.get("volume", 0)),
             })
+        return ohlcv[-2500:]
+
+    try:
+        ohlcv = ohlcv_cache.get_or_set(cache_key, load_ohlcv)
     except HTTPException:
         raise
     except Exception as exc:
@@ -187,7 +240,7 @@ def symbol_detail(symbol: str):
     quote = _quote_snapshot(sym)
     news = intelligence.get_symbol_news(sym)
     fund = fundamental.assess(sym).to_dict()
-    analysis = analyzer.analyze_symbol(sym)
+    analysis = analyzer.analyze_symbol(sym) if analyze else None
 
     today = datetime.now().strftime("%Y-%m-%d")
     end = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
@@ -206,97 +259,80 @@ def symbol_detail(symbol: str):
 
 @app.get("/api/technical/overview")
 def technical_overview():
-    breadth = MarketBreadth.get_breadth_score()
-    regime = RegimeDetector(CONFIG.get("regime")).detect(
-        breadth_score=breadth.get("score", 50)
-    )
-    env_score = round(regime.score, 1)
+    def build():
+        breadth = MarketBreadth.get_breadth_score()
+        regime = RegimeDetector(CONFIG.get("regime")).detect(
+            breadth_score=breadth.get("score", 50)
+        )
+        env_score = round(regime.score, 1)
 
-    etf_rows = []
-    for sym, name in TOP_ETFS:
-        try:
-            raw = yf.download(sym, period="5d", interval="1d", progress=False)
-            if raw is None or raw.empty:
-                continue
-            df = normalize_columns(raw)
-            closes = df["close"]
-            if hasattr(closes, "columns"):
-                closes = closes.iloc[:, 0]
-            first = float(closes.iloc[0])
-            last = float(closes.iloc[-1])
-            chg = (last / first - 1) * 100 if first else 0
-            spark = [float(x) for x in closes.tail(20).tolist()]
-            etf_rows.append({
-                "symbol": sym,
+        etf_rows = batch_etf_snapshots(TOP_ETFS)
+
+        quotes = batch_quotes(INTERNAL_UNIVERSE)
+        advancing = declining = unchanged = 0
+        for sym in INTERNAL_UNIVERSE:
+            pct = (quotes.get(sym) or {}).get("change_pct", 0)
+            if pct > 0.05:
+                advancing += 1
+            elif pct < -0.05:
+                declining += 1
+            else:
+                unchanged += 1
+        total = advancing + declining + unchanged
+        up_ratio = round(advancing / total * 100, 1) if total else 0
+        down_ratio = round(declining / total * 100, 1) if total else 0
+
+        rel = SectorTracker.get_relative_strength("5d")
+        sectors = []
+        for etf, name in SectorTracker.SECTORS.items():
+            perf = SectorTracker._period_return_pct(etf, "5d")
+            sectors.append({
+                "symbol": etf,
                 "name": name,
-                "price": round(last, 2),
-                "change_pct": round(chg, 2),
-                "sparkline": spark,
+                "change_pct": round(float(perf or 0), 2),
+                "vs_spy": round(float(rel.get(name, 0)), 2),
             })
-        except Exception as exc:
-            logger.debug("etf %s: %s", sym, exc)
+        sectors.sort(key=lambda x: x["change_pct"], reverse=True)
+        sectors = sectors[:11]
 
-    advancing = declining = unchanged = 0
-    for sym in INTERNAL_UNIVERSE:
-        q = _quote_snapshot(sym)
-        pct = q.get("change_pct", 0)
-        if pct > 0.05:
-            advancing += 1
-        elif pct < -0.05:
-            declining += 1
-        else:
-            unchanged += 1
-    total = advancing + declining + unchanged
-    up_ratio = round(advancing / total * 100, 1) if total else 0
-    down_ratio = round(declining / total * 100, 1) if total else 0
+        headlines = intelligence.get_headlines(limit=15)
+        hot_symbols = ["NVDA", "AMD", "SMCI", "PLTR", "META", "TSLA", "COIN", "HOOD", "MU", "MRVL"]
+        hot_quotes = batch_quotes(hot_symbols)
+        fundamentals_hot = []
+        for sym in hot_symbols:
+            view = fundamental.assess(sym)
+            vd = view.to_dict()
+            q = hot_quotes.get(sym) or _quote_snapshot(sym)
+            fundamentals_hot.append({
+                "symbol": sym,
+                **q,
+                "tier": view.tier,
+                "tier_label": vd.get("tier_label", ""),
+                "metrics": view.metrics,
+            })
 
-    rel = SectorTracker.get_relative_strength("5d")
-    sectors = []
-    for etf, name in SectorTracker.SECTORS.items():
-        perf = SectorTracker._period_return_pct(etf, "5d")
-        sectors.append({
-            "symbol": etf,
-            "name": name,
-            "change_pct": round(float(perf or 0), 2),
-            "vs_spy": round(float(rel.get(name, 0)), 2),
-        })
-    sectors.sort(key=lambda x: x["change_pct"], reverse=True)
-    sectors = sectors[:11]
+        return {
+            "market_environment": {
+                "score": env_score,
+                "label": regime.regime,
+                "regime": regime.to_dict(),
+                "breadth": breadth,
+            },
+            "overall_market": etf_rows,
+            "internals": {
+                "up_ratio": up_ratio,
+                "down_ratio": down_ratio,
+                "advancing": advancing,
+                "declining": declining,
+                "unchanged": unchanged,
+            },
+            "sectors": sectors,
+            "headlines": headlines,
+            "fundamentals_hot": fundamentals_hot,
+            "updated_at": datetime.now().isoformat(),
+        }
 
-    headlines = intelligence.get_headlines(limit=15)
-    hot_symbols = ["NVDA", "AMD", "SMCI", "PLTR", "META", "TSLA", "COIN", "HOOD", "MU", "MRVL"]
-    fundamentals_hot = []
-    for sym in hot_symbols:
-        view = fundamental.assess(sym)
-        q = _quote_snapshot(sym)
-        fundamentals_hot.append({
-            "symbol": sym,
-            **q,
-            "tier": view.tier,
-            "tier_label": view.tier_label if hasattr(view, "tier_label") else "",
-            "metrics": view.metrics,
-        })
-
-    return {
-        "market_environment": {
-            "score": env_score,
-            "label": regime.regime,
-            "regime": regime.to_dict(),
-            "breadth": breadth,
-        },
-        "overall_market": etf_rows,
-        "internals": {
-            "up_ratio": up_ratio,
-            "down_ratio": down_ratio,
-            "advancing": advancing,
-            "declining": declining,
-            "unchanged": unchanged,
-        },
-        "sectors": sectors,
-        "headlines": headlines,
-        "fundamentals_hot": fundamentals_hot,
-        "updated_at": datetime.now().isoformat(),
-    }
+    return technical_cache.get_or_set("technical_overview", build)
 
 
 @app.get("/api/insider/summary")
@@ -307,6 +343,9 @@ def insider_summary(date: str | None = None, sort: str = "composite"):
     ranked = insider_tracker.rank_transactions(summary.transactions, sort=sort)
     data = summary.to_dict()
     data["ranking"] = ranked[:50]
+    data["data_available"] = bool(insider_tracker._client)
+    if not insider_tracker._client:
+        data["notice"] = "設定 FINNHUB_API_KEY 以載入 Form 4 內部交易數據"
     return data
 
 
@@ -332,7 +371,6 @@ def calendar_earnings_detail(symbol: str, date: str | None = None):
 
 @app.get("/api/ai/chat")
 def ai_chat(q: str = Query(..., min_length=1)):
-    """Rule-based assistant using V4.5 analysis context."""
     q_lower = q.lower()
     symbols = []
     for tok in q.upper().replace(",", " ").split():
@@ -351,9 +389,7 @@ def ai_chat(q: str = Query(..., min_length=1)):
     signals = analyzer.get_signals()
     regime = RegimeDetector(CONFIG.get("regime")).detect()
 
-    answer_parts = [
-        f"市場環境：{regime.regime}（分數 {regime.score:.0f}/100）。",
-    ]
+    answer_parts = [f"市場環境：{regime.regime}（分數 {regime.score:.0f}/100）。"]
     for a in analyses:
         sym = a.get("symbol")
         sig = a.get("signal") or {}
@@ -364,6 +400,9 @@ def ai_chat(q: str = Query(..., min_length=1)):
         )
         if a.get("reason"):
             answer_parts.append(f"  原因：{a.get('reason')}")
+        retail = a.get("retail")
+        if retail and isinstance(retail, dict):
+            answer_parts.append(f"  散戶視角：{retail.get('summary', '')}")
 
     if "買" in q or "buy" in q_lower or "signal" in q_lower:
         if signals:
@@ -385,8 +424,11 @@ def ai_chat(q: str = Query(..., min_length=1)):
 
 
 @app.get("/api/ai/signals")
-def ai_signals():
-    return {"signals": analyzer.get_signals(), "updated_at": datetime.now().isoformat()}
+def ai_signals(force: bool = False):
+    return {
+        "signals": analyzer.get_signals(force=force),
+        "updated_at": datetime.now().isoformat(),
+    }
 
 
 @app.get("/api/search")
@@ -399,7 +441,7 @@ def search_symbols(q: str = Query(..., min_length=1), limit: int = 20):
 
             client = finnhub.Client(api_key=api_key)
             data = client.symbol_lookup(q)
-            for item in (data or {}).get("result") or [][:limit]:
+            for item in ((data or {}).get("result") or [])[:limit]:
                 sym = item.get("symbol", "")
                 if not sym:
                     continue
@@ -427,7 +469,6 @@ def search_trends(limit: int = 20):
     return {"trends": intelligence.get_hot_trends(limit=limit)}
 
 
-# Serve frontend if built
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 if FRONTEND_DIST.exists():
     app.mount("/", StaticFiles(directory=str(FRONTEND_DIST), html=True), name="static")
