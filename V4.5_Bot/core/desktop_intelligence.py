@@ -78,6 +78,7 @@ class DesktopIntelligence:
         self._cache: list[IntelligenceItem] = []
         self._last_poll = 0.0
         self._market_mood = 5.0
+        self._last_mood_ts = 0.0
         self._client = None
         if self.api_key:
             try:
@@ -126,11 +127,19 @@ class DesktopIntelligence:
         return found[:6]
 
     def _update_market_mood(self) -> float:
+        now = time.time()
+        if now - self._last_mood_ts < 300:
+            return self._market_mood
         try:
-            result = self.regime.detect()
-            self._market_mood = max(1.0, min(10.0, result.score / 10.0))
+            if self._client:
+                q = self._client.quote("SPY")
+                chg = float(q.get("dp") or 0)
+                self._market_mood = max(1.0, min(10.0, 5.0 + chg * 0.25))
+            else:
+                self._market_mood = 5.0
         except Exception as exc:
-            logger.debug("regime mood failed: %s", exc)
+            logger.debug("market mood failed: %s", exc)
+        self._last_mood_ts = now
         return self._market_mood
 
     def _fetch_google_rss(self, query: str) -> list[IntelligenceItem]:

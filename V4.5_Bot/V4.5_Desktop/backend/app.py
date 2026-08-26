@@ -28,7 +28,7 @@ from core.earnings_calendar import EarningsCalendar
 from core.fundamental_filter import FundamentalFilter
 from core.insider_tracker import InsiderTracker
 from core.market_breadth import MarketBreadth
-from core.regime import RegimeDetector
+from services.desktop_regime import desktop_regime
 
 from services.market_cache import (
     TTLCache,
@@ -45,6 +45,8 @@ silence_yfinance_logs()
 logger = logging.getLogger(__name__)
 
 load_dotenv(str(BOT_ROOT / "data" / ".env"))
+if os.environ.get("FINNHUB_KEY") and not os.environ.get("FINNHUB_API_KEY"):
+    os.environ["FINNHUB_API_KEY"] = os.environ["FINNHUB_KEY"]
 
 app = FastAPI(title="V4.5 Desktop Intelligence", version="1.2.0")
 app.add_middleware(
@@ -99,6 +101,8 @@ INTERNAL_UNIVERSE = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "JPM",
     "V", "UNH", "XOM", "AMD", "NFLX", "PLTR", "MU",
 ]
+
+TIER_LABEL_FALLBACK = "Acceptable tier B (fundamentals deferred)"
 
 
 def _load_watchlist() -> list[str]:
@@ -165,11 +169,31 @@ def _company_name(symbol: str) -> str:
     return sym
 
 
+def _technical_skeleton() -> dict[str, Any]:
+    breadth = MarketBreadth.get_breadth_score()
+    env = desktop_regime(breadth, _empty_quote("SPY"))
+    return {
+        "market_environment": env,
+        "overall_market": [],
+        "internals": {
+            "up_ratio": 0,
+            "down_ratio": 0,
+            "advancing": 0,
+            "declining": 0,
+            "unchanged": 0,
+        },
+        "sectors": [],
+        "headlines": [],
+        "fundamentals_hot": [],
+        "loading": True,
+        "updated_at": datetime.now().isoformat(),
+    }
+
+
 def _build_technical() -> dict[str, Any]:
     breadth = MarketBreadth.get_breadth_score()
-    regime = RegimeDetector(CONFIG.get("regime")).detect(
-        breadth_score=breadth.get("score", 50)
-    )
+    spy_q = _quote_snapshot("SPY")
+    env = desktop_regime(breadth, spy_q)
     quotes = _cached_quotes(INTERNAL_UNIVERSE)
     etf_rows = batch_etf_snapshots(TOP_ETFS)
     sectors = sector_rows()
@@ -189,30 +213,16 @@ def _build_technical() -> dict[str, Any]:
     for sym in hot_symbols:
         q = hot_quotes.get(sym) or _quote_snapshot(sym)
         cached_f = fund_cache.get(f"f:{sym}")
-        if cached_f:
-            view = cached_f
-        else:
-            try:
-                view = fundamental.assess(sym).to_dict()
-                fund_cache.set(f"f:{sym}", view)
-            except Exception as exc:
-                logger.debug("fund assess %s: %s", sym, exc)
-                view = {"tier": "B", "tier_label": "", "metrics": {}}
-            time.sleep(0.3)
+        view = cached_f or {"tier": "B", "tier_label": TIER_LABEL_FALLBACK, "metrics": {}}
         fundamentals_hot.append({
             "symbol": sym,
             **q,
             "tier": view.get("tier", "B"),
-            "tier_label": view.get("tier_label", ""),
+            "tier_label": view.get("tier_label", TIER_LABEL_FALLBACK),
             "metrics": view.get("metrics", {}),
         })
     return {
-        "market_environment": {
-            "score": round(regime.score, 1),
-            "label": regime.regime,
-            "regime": regime.to_dict(),
-            "breadth": breadth,
-        },
+        "market_environment": env,
         "overall_market": etf_rows,
         "internals": {
             "up_ratio": round(advancing / total * 100, 1),
@@ -242,7 +252,7 @@ def _build_bootstrap() -> dict[str, Any]:
         {**quotes.get(s, _quote_snapshot(s)), "name": _company_name(s)}
         for s in wl
     ]
-    technical = technical_cache.get_or_set("technical_overview", _build_technical)
+    technical = technical_cache.get("technical_overview") or _technical_skeleton()
     today = datetime.now().strftime("%Y-%m-%d")
     week_end = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
 
@@ -277,12 +287,25 @@ def warmup_cache():
 
     def _warm():
         try:
+            key = _news_cfg.get("finnhub_key") or ""
+            if key:
+                test = quote_one("AAPL")
+                if test.get("price", 0) > 0:
+                    logger.info("Finnhub OK - AAPL $%s", test["price"])
+                else:
+                    logger.warning("FINNHUB_KEY is set but AAPL quote failed - check key at finnhub.io")
+            else:
+                logger.warning("No FINNHUB_KEY in data/.env - quotes will fail when Yahoo blocks you")
+
             intelligence.poll(force=True)
-            feed = feed_cache.get_or_set("feed", lambda: intelligence.get_feed(limit=50))
             wl = _load_watchlist()
             _cached_quotes(wl)
-            payload = _build_bootstrap()
-            bootstrap_cache.set("bootstrap", payload)
+            bootstrap_cache.set("bootstrap", _build_bootstrap())
+            try:
+                technical_cache.set("technical_overview", _build_technical())
+                bootstrap_cache.set("bootstrap", _build_bootstrap())
+            except Exception as exc:
+                logger.warning("technical build deferred: %s", exc)
             logger.info("Desktop cache warmed")
         except Exception as exc:
             logger.warning("warmup failed: %s", exc)
@@ -292,14 +315,18 @@ def warmup_cache():
 
 @app.get("/api/health")
 def health():
+    finnhub_ok = bool(_news_cfg.get("finnhub_key"))
+    sample = quote_one("AAPL") if finnhub_ok else _empty_quote("AAPL")
     return {
         "status": "ok",
         "mode": "intelligence-only",
         "auto_trade": False,
-        "finnhub": bool(_news_cfg.get("finnhub_key")),
+        "finnhub": finnhub_ok,
+        "finnhub_live": finnhub_ok and sample.get("price", 0) > 0,
+        "sample_aapl": sample,
         "data_hint": (
-            "Set FINNHUB_KEY in data/.env for reliable quotes when Yahoo rate-limits."
-            if not _news_cfg.get("finnhub_key")
+            "Add FINNHUB_KEY=your_key to data/.env and restart API."
+            if not finnhub_ok or sample.get("price", 0) <= 0
             else None
         ),
     }
@@ -373,8 +400,12 @@ def symbol_detail(symbol: str, analyze: bool = False):
     quote = _quote_snapshot(sym)
     news = intelligence.get_symbol_news(sym)
     cached_f = fund_cache.get(f"f:{sym}")
-    fund = cached_f or fundamental.assess(sym).to_dict()
-    if not cached_f:
+    if cached_f:
+        fund = cached_f
+    elif _news_cfg.get("finnhub_key"):
+        fund = {"tier": "B", "tier_label": TIER_LABEL_FALLBACK, "metrics": {}}
+    else:
+        fund = fundamental.assess(sym).to_dict()
         fund_cache.set(f"f:{sym}", fund)
 
     today = datetime.now().strftime("%Y-%m-%d")
@@ -453,8 +484,9 @@ def ai_chat(q: str = Query(..., min_length=1)):
         symbols = _extract_symbols(q)
         if not symbols:
             symbols = _load_watchlist()[:3]
-        regime = RegimeDetector(CONFIG.get("regime")).detect()
-        answer_parts = [f"市場環境：{regime.regime}（分數 {regime.score:.0f}/100）。"]
+        breadth = MarketBreadth.get_breadth_score()
+        regime = desktop_regime(breadth, _quote_snapshot("SPY"))
+        answer_parts = [f"市場環境：{regime['label']}（分數 {regime['score']:.0f}/100）。"]
         for sym in symbols[:2]:
             qd = _quote_snapshot(sym)
             answer_parts.append(f"{sym}：現價 ${qd['price']}，今日 {qd['change_pct']:+.2f}%。")
@@ -463,15 +495,6 @@ def ai_chat(q: str = Query(..., min_length=1)):
                 answer_parts.append(
                     f"  基本面等級 {cached_f.get('tier', '—')}：{cached_f.get('tier_label', '')}"
                 )
-            elif qd["price"] > 0:
-                try:
-                    view = fundamental.assess(sym).to_dict()
-                    fund_cache.set(f"f:{sym}", view)
-                    answer_parts.append(
-                        f"  基本面等級 {view.get('tier', '—')}：{view.get('tier_label', '')}"
-                    )
-                except Exception as exc:
-                    logger.debug("fund assess %s: %s", sym, exc)
 
         wants_signals = any(
             kw in q_lower for kw in ("買", "buy", "訊號", "signal", "可以買", "值得")
@@ -494,7 +517,7 @@ def ai_chat(q: str = Query(..., min_length=1)):
             "question": q,
             "answer": "\n".join(answer_parts),
             "signals": signals,
-            "regime": regime.to_dict(),
+            "regime": regime["regime"],
         }
     except Exception as exc:
         logger.exception("ai_chat failed")
@@ -508,9 +531,6 @@ def ai_signals(force: bool = False):
             signals = analyzer.get_signals(force=True, init_if_needed=True)
         else:
             signals = analyzer.get_signals(init_if_needed=False)
-            if not signals and not analyzer._initialized:
-                import threading
-                threading.Thread(target=analyzer.warm_signals, daemon=True).start()
         return {"signals": signals, "updated_at": datetime.now().isoformat()}
     except Exception as exc:
         logger.exception("ai_signals failed")

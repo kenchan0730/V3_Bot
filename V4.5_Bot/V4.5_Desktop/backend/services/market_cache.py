@@ -155,7 +155,7 @@ def quote_one(symbol: str) -> dict[str, Any]:
     if q:
         return q
     if _finnhub_key():
-        time.sleep(FINNHUB_GAP)
+        return _empty_quote(sym)
     return _quote_yfinance_history(sym) or _empty_quote(sym)
 
 
@@ -204,6 +204,8 @@ def fetch_ohlcv(symbol: str, period: str = "2y") -> list[dict[str, Any]]:
     rows = _fetch_ohlcv_finnhub(sym, period)
     if rows:
         return rows
+    if _finnhub_key():
+        return []
     yf_sym = _yf_symbol(sym)
 
     def _load():
@@ -237,16 +239,15 @@ def etf_snapshot(symbol: str, name: str) -> Optional[dict[str, Any]]:
     q = quote_one(symbol)
     if q["price"] <= 0:
         return None
-    spark: list[float] = []
-    hist = _ticker_history(symbol, "5d")
-    if hist is not None and not hist.empty:
-        df = normalize_columns(hist)
-        closes = df["close"]
-        if hasattr(closes, "columns"):
-            closes = closes.iloc[:, 0]
-        spark = [float(x) for x in closes.tail(20).tolist()]
-    if not spark:
-        spark = [q["price"]]
+    spark = [q["price"]]
+    if not _finnhub_key():
+        hist = _ticker_history(symbol, "5d")
+        if hist is not None and not hist.empty:
+            df = normalize_columns(hist)
+            closes = df["close"]
+            if hasattr(closes, "columns"):
+                closes = closes.iloc[:, 0]
+            spark = [float(x) for x in closes.tail(20).tolist()] or spark
     return {
         "symbol": symbol,
         "name": name,
