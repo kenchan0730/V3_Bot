@@ -319,22 +319,23 @@ def warmup_cache():
 def health():
     finnhub_ok = bool(_news_cfg.get("finnhub_key"))
     sample = quote_one("AAPL") if finnhub_ok else _empty_quote("AAPL")
-    sample_ohlcv = fetch_ohlcv("AAPL", period="6mo") if finnhub_ok else []
+    sample_ohlcv = ohlcv_cache.get("ohlcv:AAPL") or []
+    ohlcv_live = len(sample_ohlcv) > 0
     return {
         "status": "ok",
         "mode": "intelligence-only",
         "auto_trade": False,
         "finnhub": finnhub_ok,
         "finnhub_live": finnhub_ok and sample.get("price", 0) > 0,
-        "ohlcv_live": len(sample_ohlcv) > 0,
+        "ohlcv_live": ohlcv_live,
         "sample_aapl": sample,
         "sample_aapl_bars": len(sample_ohlcv),
         "data_hint": (
             "Add FINNHUB_KEY=your_key to data/.env and restart API."
             if not finnhub_ok or sample.get("price", 0) <= 0
             else (
-                "Finnhub quotes OK but K-line empty — OHLCV now falls back to Alpaca/yfinance after restart."
-                if not sample_ohlcv
+                "Quotes OK; K-line loads on first symbol open (Finnhub → Alpaca → Yahoo)."
+                if not ohlcv_live
                 else None
             )
         ),

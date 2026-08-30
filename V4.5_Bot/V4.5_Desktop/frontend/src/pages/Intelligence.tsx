@@ -16,8 +16,15 @@ export function IntelligencePage({ onSelectSymbol }: { onSelectSymbol: (s: strin
         <button className={`tab ${sub === 'watchlist' ? 'active' : ''}`} onClick={() => setSub('watchlist')}>自選</button>
       </div>
 
-      {loading && !feed.length && <div className="loading">載入情報中…</div>}
-      {error && <div className="error">{error}</div>}
+      {loading && !feed.length && <div className="loading">載入情報中…（API 啟動中會自動重試）</div>}
+      {error && (
+        <div className="error">
+          {error}
+          <div style={{ marginTop: 8 }}>
+            <button type="button" className="btn btn-ghost" onClick={() => window.location.reload()}>重新整理</button>
+          </div>
+        </div>
+      )}
 
       {sub === 'latest' && feed.map((item) => (
         <div

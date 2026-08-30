@@ -8,7 +8,13 @@ export function TechnicalPage() {
   const [section, setSection] = useState<'overview' | 'sectors' | 'headlines' | 'fundamentals'>('overview')
 
   if (loading && !technical) return <div className="loading">載入技術面…</div>
-  if (!technical) return <div className="error">無法載入技術面數據</div>
+  if (!technical) {
+    return (
+      <div className="error">
+        無法載入技術面數據 — 請確認 V4.5 API 已啟動，或執行 V4.5_Desktop\diagnose.bat
+      </div>
+    )
+  }
 
   const env = technical.market_environment
   const markerPct = Math.min(100, Math.max(0, env.score))

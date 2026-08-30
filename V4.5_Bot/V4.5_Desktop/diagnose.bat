@@ -2,17 +2,18 @@
 setlocal EnableExtensions
 cd /d "%~dp0\.."
 set "ROOT=%CD%"
+set "DESKTOP=%ROOT%\V4.5_Desktop"
 set "PYTHONPATH=%ROOT%"
 
-call "%~dp0\_find_python.bat"
+call "%DESKTOP%\_find_python.bat"
 if errorlevel 1 exit /b 1
 
 echo ========================================
-echo   Finnhub Key Test
+echo   V4.5 Desktop Diagnostics
 echo ========================================
 echo.
 
-%PY% "%~dp0scripts\verify_setup.py"
+%PY% "%DESKTOP%\scripts\verify_setup.py"
 echo.
 pause
 exit /b %ERRORLEVEL%
